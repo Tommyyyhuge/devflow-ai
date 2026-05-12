@@ -1,0 +1,59 @@
+[project]
+name = "devflow-ai"
+version = "0.1.0"
+description = "低成本的 AI 编程助手 — 基于 DeepSeek V4 Flash，内置预算上限"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "DevFlow Team" }
+]
+keywords = ["ai", "coding-assistant", "deepseek", "agent", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "openai>=1.0.0",
+    "click>=8.0",
+    "rich>=13.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pyyaml>=6.0",
+    "tiktoken>=0.5.0",
+    "structlog>=24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.3.0",
+]
+
+[project.scripts]
+devflow = "devflow.main:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]  # 允许长行（内联 HTML/CSS）
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
