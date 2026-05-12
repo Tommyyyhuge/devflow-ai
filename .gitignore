@@ -31,3 +31,6 @@ Thumbs.db
 
 # Gradio
 *.flag
+
+# Uploads
+uploads/

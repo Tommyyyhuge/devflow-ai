@@ -1,46 +1,128 @@
-"""DevFlow Web UI"""
+"""DevFlow Web UI — 文件夹上传 + AI 编程助手"""
 
+import os
+import shutil
+import zipfile
+from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI
+
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+
 from devflow.config import load_config
 from devflow.core.agent import Agent
 from devflow.llm import DeepSeekClient
 from devflow.tools.base import create_tool_registry, set_safe_root
 
 app = FastAPI()
+UPLOADS = Path("uploads").resolve()
+UPLOADS.mkdir(exist_ok=True)
+
 
 class TaskRequest(BaseModel):
     task: str
-    repo_path: str = "."
+    project: str = ""
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return PAGE
+
+
+@app.get("/api/projects")
+async def list_projects():
+    projects = []
+    for d in sorted(UPLOADS.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        if d.is_dir():
+            files = list(d.rglob("*"))
+            file_count = sum(1 for f in files if f.is_file())
+            projects.append({
+                "name": d.name,
+                "file_count": file_count,
+                "modified": datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+            })
+    return {"projects": projects}
+
+
+@app.post("/api/upload")
+async def upload_project(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.endswith(".zip"):
+        return JSONResponse({"error": "请上传 .zip 文件"}, status_code=400)
+
+    # 文件大小限制 50MB
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:
+        return JSONResponse({"error": "上传文件超过 50MB 限制"}, status_code=400)
+
+    project_name = Path(file.filename).stem
+    safe_name = "".join(c for c in project_name if c.isalnum() or c in "._-")
+    if not safe_name:
+        return JSONResponse({"error": "无效的项目名"}, status_code=400)
+
+    dest = UPLOADS / safe_name
+    if dest.exists():
+        shutil.rmtree(dest)
+
+    temp_zip = UPLOADS / f"{safe_name}.zip"
+    temp_zip.write_bytes(content)
+
+    try:
+        with zipfile.ZipFile(temp_zip) as zf:
+            infos = zf.infolist()
+            if len(infos) > 100:
+                temp_zip.unlink()
+                return JSONResponse({"error": "超过 100 个文件限制"}, status_code=400)
+            total_size = sum(info.file_size for info in infos)
+            if total_size > 100 * 1024 * 1024:
+                temp_zip.unlink()
+                return JSONResponse({"error": "解压后超过 100MB 限制"}, status_code=400)
+            zf.extractall(dest)
+    except zipfile.BadZipFile:
+        temp_zip.unlink()
+        return JSONResponse({"error": "无效的 zip 文件"}, status_code=400)
+    finally:
+        if temp_zip.exists():
+            temp_zip.unlink()
+
+    files = list(dest.rglob("*"))
+    file_count = sum(1 for f in files if f.is_file())
+    return {"success": True, "name": safe_name, "file_count": file_count}
+
+
+@app.delete("/api/projects/{name}")
+async def delete_project(name: str):
+    dest = UPLOADS / name
+    if not dest.exists():
+        return JSONResponse({"error": "项目不存在"}, status_code=404)
+    shutil.rmtree(dest)
+    return {"success": True, "name": name}
+
 
 @app.post("/api/run")
 async def run_task(req: TaskRequest):
     config = load_config()
     if not config.llm.api_key.get_secret_value():
         return JSONResponse({"error": "请设置 DEEPSEEK_API_KEY"}, status_code=400)
-    repo_path = Path(req.repo_path).resolve()
+
+    repo_path = UPLOADS / req.project if req.project else Path(".").resolve()
     set_safe_root(repo_path)
     client = DeepSeekClient(config.llm)
     tools = create_tool_registry()
     agent = Agent(client, tools, config=config)
     result = await agent.run(req.task, repo_path)
     return {
-        "success": result.success,
-        "error": result.error,
+        "success": result.success, "error": result.error,
         "steps": [{"index": sr.step.index, "description": sr.step.description[:120], "success": sr.success, "output": (sr.output or "")[:300]} for sr in result.step_results] if result.plan else [],
         "files_modified": result.files_modified,
         "verify": {"passed": result.verify_result.passed if result.verify_result else True, "errors": [e.message for e in result.verify_result.errors] if result.verify_result else []},
     }
 
+
 def main():
     import uvicorn
     uvicorn.run("devflow.api.server:app", host="0.0.0.0", port=8000, reload=True)
+
 
 PAGE = """<!DOCTYPE html>
 <html lang="zh">
@@ -48,200 +130,219 @@ PAGE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DevFlow - AI 编程助手</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
-:root{--bg:#0a0a0a;--s1:#111111;--s2:#1a1a1a;--s3:#252525;--bdr:#2a2a2a;--t1:#ededed;--t2:#999;--t3:#666;--ac:#3b82f6;--gr:#10b981;--rd:#ef4444;--r:14px}
+:root{--bg:#0a0a0a;--s1:#111;--s2:#1a1a1a;--s3:#252525;--bdr:#2a2a2a;--t1:#ededed;--t2:#999;--t3:#666;--ac:#3b82f6;--gr:#10b981;--rd:#ef4444;--r:14px}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--t1);min-height:100vh}
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--s3);border-radius:3px}
-
-/* 导航栏 */
 nav{display:flex;align-items:center;justify-content:space-between;padding:16px 36px;background:var(--s1);border-bottom:1px solid var(--bdr)}
 nav .logo{font-size:18px;font-weight:700;letter-spacing:-.3px}
 nav .logo span{color:var(--ac)}
 nav .logo .v{font-size:11px;background:var(--ac);color:#fff;padding:2px 9px;border-radius:12px;margin-left:10px}
 nav .status{font-size:13px;color:var(--t2);display:flex;gap:20px}
-nav .status b{color:var(--t1)}
-
-/* 主布局 */
 .container{max-width:1000px;margin:0 auto;padding:32px 40px}
-
-/* 统计卡片 */
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-bottom:36px}
-.stat{background:var(--s1);border:1px solid var(--bdr);border-radius:var(--r);padding:24px 22px}
-.stat .v{font-size:32px;font-weight:700;line-height:1.1;margin-bottom:6px}
-.stat .l{font-size:13px;color:var(--t3)}
-
-/* 任务卡片 */
 .card{background:var(--s1);border:1px solid var(--bdr);border-radius:var(--r);padding:28px 30px;margin-bottom:24px}
-.card.active{border-color:var(--ac);box-shadow:0 0 0 1px var(--ac)}
 .card h3{font-size:16px;font-weight:600;margin-bottom:18px}
 
-/* 输入框 */
-textarea{width:100%;background:var(--bg);color:var(--t1);border:1px solid var(--bdr);border-radius:10px;padding:18px 20px;font:inherit;font-size:15px;resize:vertical;min-height:130px;transition:border .2s;line-height:1.8}
-textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(59,130,246,.1)}
-textarea::placeholder{color:var(--t3)}
+/* 上传区 */
+.drop-zone{border:2px dashed var(--bdr);border-radius:var(--r);padding:32px 24px;text-align:center;cursor:pointer;transition:all .2s;background:var(--s2);margin-bottom:18px}
+.drop-zone:hover,.drop-zone.dragover{border-color:var(--ac);background:rgba(59,130,246,.06)}
+.drop-zone .icon{font-size:36px;margin-bottom:8px}
+.drop-zone p{color:var(--t2);font-size:14px;margin:4px 0}
+.drop-zone .small{color:var(--t3);font-size:12px}
 
-/* 按钮 */
+/* 项目选择器 */
+.project-bar{display:flex;align-items:center;gap:14px;margin-bottom:18px;padding:14px 18px;background:var(--s2);border-radius:10px;border:1px solid var(--bdr)}
+.project-bar select{flex:1;background:var(--s1);color:var(--t1);border:1px solid var(--bdr);border-radius:8px;padding:10px 14px;font:inherit;font-size:14px}
+.project-bar select:focus{outline:none;border-color:var(--ac)}
+.project-bar .info{font-size:13px;color:var(--t3);white-space:nowrap}
+.project-bar .btn-sm{font-size:13px;padding:8px 16px;background:var(--s3);color:var(--t2);border:1px solid var(--bdr);border-radius:8px;cursor:pointer;transition:all .12s;white-space:nowrap}
+.project-bar .btn-sm:hover{color:var(--t1);border-color:var(--t3)}
+
+/* 任务区 */
+textarea{width:100%;background:var(--bg);color:var(--t1);border:1px solid var(--bdr);border-radius:10px;padding:18px 20px;font:inherit;font-size:15px;resize:vertical;min-height:110px;transition:border .2s;line-height:1.8}
+textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(59,130,246,.1)}
 .btn{display:inline-flex;align-items:center;gap:8px;background:var(--ac);color:#fff;border:none;padding:12px 28px;border-radius:10px;font:inherit;font-size:15px;font-weight:500;cursor:pointer;transition:all .15s}
 .btn:hover{filter:brightness(1.1);transform:translateY(-1px)}
-.btn:active{transform:translateY(0)}
 .btn:disabled{opacity:.3;cursor:not-allowed;transform:none}
 .spin{display:inline-block;width:15px;height:15px;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:sp .6s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
-
-/* 模板 */
-.templates{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 0}
-.template{font-size:13px;padding:6px 14px;background:var(--s2);border:1px solid var(--bdr);border-radius:22px;cursor:pointer;color:var(--t2);transition:all .15s;white-space:nowrap}
-.template:hover{color:var(--t1);border-color:var(--ac);background:rgba(59,130,246,.08)}
-
-/* 操作栏 */
 .actions{display:flex;align-items:center;justify-content:space-between;margin-top:20px}
 .hint{font-size:13px;color:var(--t3)}
 .hint kbd{display:inline-block;background:var(--s2);border:1px solid var(--bdr);border-radius:5px;padding:1px 7px;font:inherit;font-size:12px}
 
-/* 结果区 */
-.step{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--bdr);align-items:flex-start}
-.step:last-child{border:none}
-.step-badge{width:28px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;margin-top:2px;font-weight:700}
-.badge-ok{background:rgba(16,185,129,.12);color:var(--gr)}
-.badge-fail{background:rgba(239,68,68,.12);color:var(--rd)}
-.step-body{flex:1;min-width:0}
-.step-desc{font-size:14px;line-height:1.6}
-.step-output{font-size:13px;color:var(--t3);margin-top:4px;font-family:"SF Mono","Fira Code","Cascadia Code",monospace;background:var(--bg);padding:6px 10px;border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-/* 文件列表 */
-.file-list{margin-top:4px}
-.file-item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:13px;color:var(--t3);background:var(--s2);border-radius:8px;margin:4px 0}
-.file-item span{color:var(--t2);font-family:"SF Mono","Fira Code",monospace;font-size:12px}
-
-/* 进度条 */
+/* 进度 */
+.upload-progress{display:none;margin-top:12px;font-size:13px;color:var(--t2)}
+.upload-progress .bar{background:var(--s3);border-radius:6px;height:4px;margin-top:6px;overflow:hidden}
+.upload-progress .bar-fill{height:100%;background:var(--ac);border-radius:6px;transition:width .3s;width:0}
 .progress-wrap{height:5px;background:var(--s2);border-radius:5px;margin:14px 0;overflow:hidden}
 .progress-fill{height:100%;background:var(--ac);border-radius:5px;transition:width .5s}
 
-/* 错误 */
-.errors{margin-top:12px;font-size:14px;color:var(--rd)}
-.errors div{padding:4px 0}
+/* 结果 */
+.step{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--bdr);align-items:flex-start}
+.step:last-child{border:none}
+.step-badge{width:28px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;margin-top:2px;font-weight:700}
+.badge-ok{background:rgba(16,185,129,.12);color:var(--gr)}.badge-fail{background:rgba(239,68,68,.12);color:var(--rd)}
+.step-body{flex:1;min-width:0}.step-desc{font-size:14px}.step-output{font-size:13px;color:var(--t3);margin-top:4px;font-family:"SF Mono","Fira Code",monospace;background:var(--bg);padding:6px 10px;border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-list{margin-top:4px}.file-item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:13px;color:var(--t3);background:var(--s2);border-radius:8px;margin:4px 0}
+.file-item span{color:var(--t2);font-family:"SF Mono","Fira Code",monospace;font-size:12px}
+.errors{margin-top:12px;font-size:14px;color:var(--rd)}.errors div{padding:4px 0}
 
-/* 工具页 */
-.tool-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
-.tool-card{background:var(--s2);padding:18px 20px;border-radius:var(--r);border:1px solid var(--bdr)}
-.tool-card .name{font-size:15px;font-weight:600;margin-bottom:4px}
-.tool-card .desc{font-size:13px;color:var(--t3);line-height:1.5}
-
-/* 关于页 */
-.about-info{font-size:14px;color:var(--t2);line-height:2.4}
-
-/* 底部 */
 footer{text-align:center;padding:32px;font-size:13px;color:var(--t3)}
 </style>
 </head>
 <body>
-
 <nav>
-  <div class="logo">Dev<span>Flow</span><span class="v">v0.1</span></div>
-  <div class="status">周预算 <b>$20</b> · 5小时预算 <b>$3.5</b> · 模型 <b>V4 Flash</b></div>
+<div class="logo">Dev<span>Flow</span><span class="v">v0.1</span></div>
+<div class="status">周预算 $20 · 5小时 $3.5 · V4 Flash</div>
 </nav>
-
 <div class="container">
 
-<!-- 统计 -->
-<div class="stats">
-  <div class="stat"><div class="v" style="color:var(--ac)">9</div><div class="l">可用工具</div></div>
-  <div class="stat"><div class="v" style="color:var(--gr)">70%</div><div class="l">测试覆盖率</div></div>
-  <div class="stat"><div class="v" style="color:#f59e0b">$20</div><div class="l">周预算上限</div></div>
-  <div class="stat"><div class="v">25</div><div class="l">测试全部通过</div></div>
+<div class="card">
+<h3>📁 上传项目</h3>
+<div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+<div class="icon">📂</div>
+<p>拖拽文件夹到此处</p>
+<p class="small">或点击选择 · 自动打包上传 · 最大 100MB</p>
+</div>
+<input type="file" id="fileInput" webkitdirectory multiple hidden onchange="handleFiles(this.files)">
+<div class="upload-progress" id="uploadProgress">
+<span id="uploadStatus">打包中...</span>
+<div class="bar"><div class="bar-fill" id="uploadBar"></div></div>
+</div>
+<div class="project-bar">
+<select id="projectSelect" onchange="onProjectChange()"><option value="">选择已上传的项目...</option></select>
+<span class="info" id="projectInfo"></span>
+<button class="btn-sm" onclick="refreshProjects()">刷新</button>
+</div>
 </div>
 
-<!-- 任务区 -->
-<div class="card active" id="task-area">
-  <h3>编程任务</h3>
-  <textarea id="input" placeholder="描述你的编程任务...&#10;&#10;例如：在 src/api/ 下添加一个 /health 健康检查端点，返回 {&quot;status&quot;: &quot;ok&quot;}&#10;例如：创建 utils/date.py，实现日期格式化和时间差计算函数"></textarea>
-  <div class="templates">
-    <span class="template" onclick='fill("创建 hello.py，包含一个返回 hello world 的函数")'>👋 创建 Hello World</span>
-    <span class="template" onclick='fill("在 src/api/ 下添加 /health GET 健康检查端点")'>🏥 添加健康检查</span>
-    <span class="template" onclick='fill("给项目添加 pytest 单元测试")'>🧪 添加单元测试</span>
-    <span class="template" onclick='fill("创建 requirements.txt 列出所有依赖")'>📦 导出依赖清单</span>
-    <span class="template" onclick='fill("实现一个递归遍历目录并统计文件数量的函数")'>🔧 写工具函数</span>
-  </div>
-  <div class="actions">
-    <div class="hint">按 <kbd>Ctrl</kbd> + <kbd>Enter</kbd> 快速提交</div>
-    <button class="btn" onclick="run()" id="go">开始执行</button>
-  </div>
+<div class="card">
+<h3>编程任务</h3>
+<textarea id="input" placeholder="描述你的编程任务...&#10;&#10;Agent 将在上方选中的项目中执行"></textarea>
+<div class="actions">
+<div class="hint">按 <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 提交 · 先选择或上传项目</div>
+<button class="btn" onclick="run()" id="go">开始执行</button>
+</div>
 </div>
 
-<!-- 结果区 -->
-<div class="card" style="display:none" id="result-area">
-  <h3 id="rTitle"></h3>
-  <div class="progress-wrap" id="progressWrap" style="display:none"><div class="progress-fill" id="progress" style="width:0"></div></div>
-  <div id="steps"></div>
-  <div class="file-list" id="files"></div>
-  <div class="errors" id="errors"></div>
-</div>
-
-<!-- 工具区 -->
-<div class="card" id="tools-area" style="display:none">
-  <h3>9 个可用工具</h3>
-  <div class="tool-grid">
-    <div class="tool-card"><div class="name">📖 读取文件</div><div class="desc">读取文件内容，支持指定行范围，自动过滤越界路径</div></div>
-    <div class="tool-card"><div class="name">✏️ 写入文件</div><div class="desc">创建新文件或覆写已有文件，自动创建父目录</div></div>
-    <div class="tool-card"><div class="name">🔧 精确编辑</div><div class="desc">精确字符串替换，要求原字符串在文件中唯一匹配</div></div>
-    <div class="tool-card"><div class="name">⚡ 执行命令</div><div class="desc">Shell 命令执行，30秒超时，危险命令自动拦截</div></div>
-    <div class="tool-card"><div class="name">🔍 代码搜索</div><div class="desc">正则表达式搜索项目代码，支持文件类型过滤</div></div>
-    <div class="tool-card"><div class="name">📊 查看改动</div><div class="desc">Git diff 查看工作区未暂存和已暂存的代码改动</div></div>
-    <div class="tool-card"><div class="name">📜 提交历史</div><div class="desc">查看最近的 Git 提交记录，支持自定义数量</div></div>
-    <div class="tool-card"><div class="name">📌 仓库状态</div><div class="desc">查看 Git 仓库当前状态，列出修改/新增/删除文件</div></div>
-  </div>
-</div>
-
-<!-- 关于 -->
-<div class="card" id="about-area" style="display:none">
-  <h3>关于 devflow-ai</h3>
-  <div class="about-info">
-    <div>核心模型：<b>DeepSeek V4 Flash</b> · 1M 上下文窗口</div>
-    <div>许可证：<b>MIT</b> · Python 3.11+</div>
-    <div>接口形式：CLI + Web UI</div>
-    <div>内置预算保护：$20 / 周 · $3.5 / 5小时</div>
-    <div>开源地址：github.com/你的用户名/devflow-ai</div>
-  </div>
+<div class="card" style="display:none" id="resultCard">
+<h3 id="rTitle"></h3>
+<div class="progress-wrap" id="progressWrap" style="display:none"><div class="progress-fill" id="progress" style="width:0"></div></div>
+<div id="steps"></div>
+<div class="file-list" id="files"></div>
+<div class="errors" id="errors"></div>
 </div>
 
 </div>
-
-<footer>DeepSeek V4 Flash · 极低成本 · MIT 开源</footer>
+<footer>DeepSeek V4 Flash · MIT</footer>
 
 <script>
-function fill(t){document.getElementById('input').value=t;document.getElementById('input').focus()}
-function show(id){['task-area','tools-area','about-area'].forEach(x=>document.getElementById(x).style.display=x===id?'block':'none')}
+var currentProject='';
+function onProjectChange(){var s=document.getElementById('projectSelect');currentProject=s.value;document.getElementById('projectInfo').textContent=s.selectedOptions[0]?s.selectedOptions[0].dataset.info:''}
+async function refreshProjects(){
+var r=await fetch('/api/projects');var d=await r.json();
+var sel=document.getElementById('projectSelect');
+sel.innerHTML='<option value="">选择已上传的项目...</option>';
+(d.projects||[]).forEach(function(p){
+var opt=document.createElement('option');opt.value=p.name;
+opt.textContent=p.name+' ('+p.file_count+' 文件 · '+p.modified+')';
+opt.dataset.info=p.file_count+' 文件 · '+p.modified;
+sel.appendChild(opt);
+});
+if(currentProject){sel.value=currentProject;onProjectChange()}
+}
+refreshProjects();
+
+// 拖拽上传
+var drop=document.getElementById('dropZone');
+['dragenter','dragover'].forEach(function(e){drop.addEventListener(e,function(ev){ev.preventDefault();drop.classList.add('dragover')})});
+['dragleave','drop'].forEach(function(e){drop.addEventListener(e,function(){drop.classList.remove('dragover')})});
+drop.addEventListener('drop',function(ev){ev.preventDefault();handleItems(ev.dataTransfer.items)});
+
+async function handleItems(items){
+var files=[];for(var i=0;i<items.length;i++){var entry=items[i].webkitGetAsEntry();if(entry)await traverse(entry,files)}
+if(!files.length)return;
+await uploadFiles(files);
+}
+async function traverse(entry,files){
+if(entry.isFile){files.push(entry)}else if(entry.isDirectory){
+var reader=entry.createReader();
+var entries=await new Promise(function(r){reader.readEntries(r)});
+for(var i=0;i<entries.length;i++)await traverse(entries[i],files);
+}
+}
+function handleFiles(fileList){
+var fakeItems=[];
+for(var i=0;i<fileList.length;i++)fakeItems.push({webkitGetAsEntry:function(){return null},file:function(f){return new Promise(function(r){r(fileList[i])})}});
+var name=fileList[0].webkitRelativePath.split('/')[0]||'project';
+uploadFromList(fileList,name);
+}
+async function uploadFromList(fileList,folderName){
+var zip=new JSZip();var count=0;
+for(var i=0;i<fileList.length;i++){
+var f=fileList[i];
+var path=f.webkitRelativePath||f.name;
+if(path.startsWith(folderName+'/'))path=path.slice(folderName.length+1);
+zip.file(path,f);count++;
+}
+var bar=document.getElementById('uploadProgress');
+bar.style.display='block';
+document.getElementById('uploadStatus').textContent='打包 '+count+' 个文件中...';
+document.getElementById('uploadBar').style.width='30%';
+var blob=await zip.generateAsync({type:'blob'},function(m){document.getElementById('uploadBar').style.width=(30+m.percent*.6)+'%'});
+document.getElementById('uploadStatus').textContent='上传中...';
+document.getElementById('uploadBar').style.width='90%';
+var fd=new FormData();fd.append('file',blob,folderName+'.zip');
+var r=await fetch('/api/upload',{method:'POST',body:fd});
+var d=await r.json();
+bar.style.display='none';
+if(d.success){refreshProjects();document.getElementById('projectSelect').value=d.name;currentProject=d.name;onProjectChange();alert('上传成功: '+d.name+' ('+d.file_count+' 文件)')}
+else{alert('上传失败: '+d.error)}
+}
+async function uploadFiles(entries){
+var fileList=[];
+for(var i=0;i<entries.length;i++){
+var f=await new Promise(function(r){entries[i].file(r)});
+f.webkitRelativePath=(entries[i].fullPath||'').replace(/^\//,'');
+fileList.push(f);
+}
+var name=fileList[0].webkitRelativePath.split('/')[0]||'project';
+await uploadFromList(fileList,name);
+}
 
 async function run(){
-  var t=document.getElementById('input').value.trim();if(!t)return;
-  var btn=document.getElementById('go'),card=document.getElementById('result-area');
-  btn.disabled=true;btn.innerHTML='<span class="spin"></span> 分析中';
-  card.style.display='block';
-  document.getElementById('rTitle').innerHTML='<span style="display:flex;align-items:center;gap:10px"><span class="spin"></span> Agent 正在分析任务...</span>';
-  document.getElementById('steps').innerHTML='';
-  document.getElementById('files').innerHTML='';
-  document.getElementById('errors').innerHTML='';
-  document.getElementById('progressWrap').style.display='block';
-  document.getElementById('progress').style.width='25%';
-  try{
-    var r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:t,repo_path:'.'})});
-    document.getElementById('progress').style.width='85%';
-    var d=await r.json();
-    document.getElementById('progress').style.width='100%';
-    setTimeout(function(){document.getElementById('progressWrap').style.display='none'},800);
-    if(d.success){document.getElementById('rTitle').innerHTML='任务执行完成'}else{document.getElementById('rTitle').innerHTML='任务执行失败: '+(d.error||'未知错误')}
-    var h='';
-    (d.steps||[]).forEach(function(s){
-      h+='<div class="step"><div class="step-badge '+(s.success?'badge-ok':'badge-fail')+'">'+(s.success?'OK':'!')+'</div><div class="step-body"><div class="step-desc">步骤 '+(s.index||'?')+': '+s.description+'</div>'+(s.output?'<div class="step-output">'+s.output+'</div>':'')+'</div></div>';
-    });
-    document.getElementById('steps').innerHTML=h||'<div style="color:var(--t3);font-size:14px;padding:12px 0">无执行步骤</div>';
-    var fh='';
-    (d.files_modified||[]).forEach(function(f){fh+='<div class="file-item">📄 <span>'+f+'</span></div>'});
-    if(fh)document.getElementById('files').innerHTML='<div style="font-size:14px;font-weight:600;margin:14px 0 8px">修改的文件</div>'+fh;
-    if(d.verify&&d.verify.errors&&d.verify.errors.length){document.getElementById('errors').innerHTML='<div style="font-size:14px;font-weight:600;margin:10px 0 6px">验证错误</div>'+d.verify.errors.map(function(e){return '<div>'+e+'</div>'}).join('')}
-  }catch(e){document.getElementById('rTitle').innerHTML='网络错误: '+e.message;document.getElementById('progressWrap').style.display='none'}
-  btn.disabled=false;btn.innerHTML='开始执行';
+var t=document.getElementById('input').value.trim();
+if(!t)return;
+if(!currentProject){alert('请先选择或上传一个项目');return}
+var btn=document.getElementById('go'),card=document.getElementById('resultCard');
+btn.disabled=true;btn.innerHTML='<span class="spin"></span>执行中';
+card.style.display='block';
+document.getElementById('rTitle').innerHTML='<span style="display:flex;align-items:center;gap:10px"><span class="spin"></span>Agent 分析中...</span>';
+document.getElementById('steps').innerHTML='';
+document.getElementById('files').innerHTML='';
+document.getElementById('errors').innerHTML='';
+document.getElementById('progressWrap').style.display='block';
+document.getElementById('progress').style.width='25%';
+try{
+var r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:t,project:currentProject})});
+document.getElementById('progress').style.width='85%';
+var d=await r.json();
+document.getElementById('progress').style.width='100%';
+setTimeout(function(){document.getElementById('progressWrap').style.display='none'},800);
+document.getElementById('rTitle').innerHTML=d.success?'任务完成':'任务失败: '+(d.error||'');
+var h='';
+(d.steps||[]).forEach(function(s){
+h+='<div class="step"><div class="step-badge '+(s.success?'badge-ok':'badge-fail')+'">'+(s.success?'OK':'!')+'</div><div class="step-body"><div class="step-desc">'+(s.index||'?')+'. '+s.description+'</div>'+(s.output?'<div class="step-output">'+s.output+'</div>':'')+'</div></div>';
+});
+document.getElementById('steps').innerHTML=h||'<div style="color:var(--t3);font-size:14px;padding:12px 0">无步骤</div>';
+var fh='';
+(d.files_modified||[]).forEach(function(f){fh+='<div class="file-item"><span>'+f+'</span></div>'});
+if(fh)document.getElementById('files').innerHTML='<div style="font-size:14px;font-weight:600;margin:14px 0 8px">修改的文件</div>'+fh;
+if(d.verify&&d.verify.errors&&d.verify.errors.length)document.getElementById('errors').innerHTML='<div style="font-size:14px;font-weight:600;margin:10px 0 6px">验证错误</div>'+d.verify.errors.map(function(e){return '<div>'+e+'</div>'}).join('')}
+catch(e){document.getElementById('rTitle').innerHTML='错误: '+e.message;document.getElementById('progressWrap').style.display='none'}
+btn.disabled=false;btn.innerHTML='开始执行';
 }
 document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();run()}});
 </script>
