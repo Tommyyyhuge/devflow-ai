@@ -1,8 +1,6 @@
 """补充测试 — 提升覆盖率到 70%+"""
 
-import pytest
-from pathlib import Path
-from devflow.config import load_config, LLMConfig, AgentConfig, BudgetConfig
+from devflow.config import AgentConfig, BudgetConfig, LLMConfig, load_config
 from devflow.tools.file_ops import EditFileTool, RunShellTool, SearchCodeTool
 
 
@@ -54,7 +52,7 @@ class TestToolsExtended:
 
 class TestVerifier:
     def test_verdict_structure(self):
-        from devflow.core.verifier import Verdict, Diagnostic
+        from devflow.core.verifier import Diagnostic, Verdict
         d = Diagnostic(file="test.py", line=1, severity="error", message="bad")
         assert d.file == "test.py"
         v = Verdict(passed=False, errors=[d])

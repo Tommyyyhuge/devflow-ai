@@ -1,6 +1,7 @@
 """基础规划器 — 任务 → 步骤拆解
 
 Week 1 简化版：使用 LLM 将自然语言任务拆解为可执行步骤。
+Week 2 升级：使用 JSON mode 替代正则解析，更健壮。
 """
 
 from dataclasses import dataclass, field
@@ -37,7 +38,7 @@ class Planner:
         self.llm = llm_client
 
     def plan(self, task: str, project_context: str = "") -> Plan:
-        """将任务拆解为步骤列表"""
+        """将任务拆解为步骤列表（使用 JSON mode 确保结构化输出）"""
         messages = [
             {
                 "role": "system",
@@ -48,11 +49,14 @@ class Planner:
                 "content": f"请将以下任务拆解为可执行步骤：\n\n{task}",
             },
         ]
-        response = self.llm.chat_for_planning(messages)
+        chat_response = self.llm.chat_for_planning(messages)
 
-        # 从 LLM 响应中解析步骤（简化版：按数字序号分割）
-        steps = self._parse_steps(response.get("choices", [{}])[0]
-                                  .get("message", {}).get("content", ""))
+        # 优先从 JSON 解析，fallback 到正则
+        content = chat_response.data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        steps = self._parse_steps_json(content)
+        if not steps:
+            steps = self._parse_steps_legacy(content)
+
         return Plan(task=task, steps=steps)
 
     def _system_prompt(self, project_context: str) -> str:
@@ -70,19 +74,59 @@ class Planner:
 1. 最后一步必须是 verify 类型
 2. 每个步骤只做一件事
 3. 用明确的文件路径
-4. 返回格式：
-1. [read] 读取 src/api/__init__.py 了解路由结构
-2. [write] 创建 src/api/health.py 实现健康检查端点
-3. [write] 修改 src/api/__init__.py 注册路由
-4. [verify] 运行 curl 验证端点
+4. 返回格式必须是 JSON：
+
+```json
+{{
+  "steps": [
+    {{"index": 1, "type": "read", "description": "读取 src/api/__init__.py 了解路由结构"}},
+    {{"index": 2, "type": "write", "description": "创建 src/api/health.py 实现健康检查端点"}},
+    {{"index": 3, "type": "write", "description": "修改 src/api/__init__.py 注册路由"}},
+    {{"index": 4, "type": "verify", "description": "运行 curl 验证端点返回 status ok"}}
+  ]
+}}
+```
 """
 
-    def _parse_steps(self, text: str) -> list[Step]:
-        """从 LLM 响应中解析步骤列表"""
+    def _parse_steps_json(self, text: str) -> list[Step]:
+        """尝试从 JSON 解析步骤（更健壮）"""
+        import json
         import re
 
         steps = []
-        # 匹配 "1. [type] description" 格式
+
+        # 提取 JSON 代码块
+        json_match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+        if json_match:
+            text = json_match.group(1)
+
+        # 尝试解析 JSON
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict) and "steps" in data:
+                for item in data["steps"]:
+                    step_type = StepType.WRITE
+                    try:
+                        step_type = StepType(item.get("type", "write").lower())
+                    except ValueError:
+                        pass
+
+                    steps.append(Step(
+                        index=item.get("index", len(steps) + 1),
+                        type=step_type,
+                        description=item.get("description", ""),
+                        expected_output=item.get("expected_output", ""),
+                    ))
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+
+        return steps
+
+    def _parse_steps_legacy(self, text: str) -> list[Step]:
+        """从 LLM 响应中解析步骤列表（fallback：正则解析）"""
+        import re
+
+        steps = []
         pattern = re.compile(r'(\d+)\s*[\.\)]\s*\[(\w+)\]\s*(.+)', re.IGNORECASE)
         matches = pattern.findall(text)
 
@@ -90,7 +134,7 @@ class Planner:
             try:
                 step_type = StepType(stype.lower())
             except ValueError:
-                step_type = StepType.WRITE  # 未知类型默认 WRITE
+                step_type = StepType.WRITE
 
             steps.append(Step(
                 index=int(num),
@@ -99,11 +143,10 @@ class Planner:
             ))
 
         if not steps:
-            # 如果没有解析到结构化步骤，创建单个 WRITE 步骤
             steps.append(Step(
                 index=1,
                 type=StepType.WRITE,
-                description=text[:500],
+                description=text.strip() or "执行任务",
             ))
 
         return steps

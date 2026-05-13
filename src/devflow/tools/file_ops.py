@@ -54,9 +54,16 @@ class EditFileTool(Tool):
 
 
 class RunShellTool(Tool):
-    """Shell 命令执行——Week 1 本地执行，Week 3 迁移到 Docker 沙箱"""
+    """Shell 命令执行——Week 1 本地执行，Week 3 迁移到 Docker 沙箱
+
+    安全策略：白名单 + 黑名单双重防护
+    1. 只允许白名单中的基础命令
+    2. 拒绝 sudo、间接执行（sh -c 等）
+    3. 黑名单作为兜底防护
+    """
     name = "run_shell"
-    description = "执行 Shell 命令并返回输出。超时 30 秒。禁止破坏性操作（rm -rf 等）。"
+    description = ("执行 Shell 命令并返回输出。超时 30 秒。"
+                   "只允许安全命令：python, pytest, pip, git, ls, cat, grep, find, curl, mkdir, touch, echo, wc, head, tail, pwd")
     parameters = {
         "type": "object",
         "properties": {
@@ -66,7 +73,16 @@ class RunShellTool(Tool):
         "required": ["command"],
     }
 
-    # 危险命令正则（大小写不敏感，防止变体绕过）
+    # 白名单：只允许这些基础命令
+    ALLOWED_COMMANDS = frozenset([
+        "python", "python3", "pytest", "pip", "pip3",
+        "git", "ls", "cat", "grep", "find", "curl", "wget",
+        "mkdir", "touch", "echo", "wc", "head", "tail",
+        "pwd", "cd", "cp", "mv", "chmod", "diff", "sort",
+        "uniq", "date", "which", "whoami", "env",
+    ])
+
+    # 黑名单：额外防护层（大小写不敏感）
     DANGEROUS_PATTERNS = [
         r"rm\s+-[rRf]+\s+/",       # rm -rf / 及其变体
         r"rm\s+-[rRf]+\s+~",       # rm -rf ~
@@ -76,17 +92,98 @@ class RunShellTool(Tool):
         r"shutdown",                # 关机
         r"reboot",                  # 重启
         r">\s*/dev/sd",             # 覆盖磁盘设备
+        r"curl\s+.*\s*\|",          # curl | sh 管道执行
+        r"wget\s+.*\s*\|",          # wget | sh 管道执行
     ]
 
-    def execute(self, command: str, timeout: int = 30, **kwargs) -> ToolResult:
-        # 安全检查（正则匹配，大小写不敏感）
+    # 禁止的基础命令（无论参数如何）
+    FORBIDDEN_BASE_COMMANDS = frozenset([
+        "sudo", "su", "ssh", "telnet", "nc", "netcat",
+        "bash", "sh", "zsh", "fish", "dash", "ksh",
+        "eval", "exec", "source", ".",
+    ])
+
+    def _extract_base_command(self, command: str) -> str:
+        """提取命令的基础名称（处理 sudo、路径等）"""
+        import shlex
+        try:
+            parts = shlex.split(command.strip())
+        except ValueError:
+            # 引号不匹配，简单分割
+            parts = command.strip().split()
+
+        if not parts:
+            return ""
+
+        # 处理 sudo
+        if parts[0].lower() == "sudo":
+            return "sudo"
+
+        # 提取命令名（去掉路径）
+        cmd = parts[0]
+        return cmd.split("/")[-1].split("\\")[-1].lower()
+
+    def _check_command_chain(self, command: str) -> tuple[bool, str]:
+        """检查命令链是否安全
+
+        Returns:
+            (是否安全, 错误信息)
+        """
         import re
+        import shlex
+
+        # 1. 检查黑名单（兜底防护）
         for pattern in self.DANGEROUS_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
-                return ToolResult(
-                    success=False,
-                    error=f"拒绝执行危险命令（匹配模式: {pattern}）",
-                )
+                return False, f"拒绝执行危险命令（匹配模式: {pattern}）"
+
+        # 2. 提取并检查基础命令
+        base = self._extract_base_command(command)
+
+        # 2a. 明确禁止的命令
+        if base in self.FORBIDDEN_BASE_COMMANDS:
+            return False, f"命令 '{base}' 在禁止列表中"
+
+        # 2b. 检查是否在白名单中
+        if base not in self.ALLOWED_COMMANDS:
+            return False, (
+                f"命令 '{base}' 不在白名单中。"
+                f"允许: {', '.join(sorted(self.ALLOWED_COMMANDS))}"
+            )
+
+        # 3. 检查管道和命令链
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            parts = command.split()
+
+        # 检查管道中的每个命令
+        pipe_commands = " ".join(parts).split("|")
+        for pipe_cmd in pipe_commands:
+            pipe_base = self._extract_base_command(pipe_cmd.strip())
+            if pipe_base in self.FORBIDDEN_BASE_COMMANDS:
+                return False, f"管道中的命令 '{pipe_base}' 被禁止"
+
+        # 4. 检查重定向到危险路径
+        redirect_patterns = [
+            r">\s*/(etc|usr|bin|sbin|lib|dev|proc|sys|root)/",
+            r">\s*/\.",
+        ]
+        for pattern in redirect_patterns:
+            if re.search(pattern, command, re.IGNORECASE):
+                return False, "拒绝写入系统目录"
+
+        return True, ""
+
+    def execute(self, command: str, timeout: int = 30, **kwargs) -> ToolResult:
+        # 空命令检查
+        if not command or not command.strip():
+            return ToolResult(success=False, error="命令不能为空")
+
+        # 安全检查
+        is_safe, error_msg = self._check_command_chain(command)
+        if not is_safe:
+            return ToolResult(success=False, error=error_msg)
 
         try:
             import subprocess

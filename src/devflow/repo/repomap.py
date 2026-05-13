@@ -1,9 +1,11 @@
 """RepoMap — 项目地图构建
 
 Week 2 Day 3-4：结构化项目索引，包含符号摘要和依赖关系。
+Week 2 升级：基于文件修改时间的增量更新缓存。
 用于为 LLM 构建精简的项目上下文。
 """
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +22,7 @@ class FileEntry:
     summary: str = ""           # <100 tokens 结构摘要
     token_count: int = 0
     imports: list[str] = field(default_factory=list)  # 导入的模块名
+    mtime: float = 0.0          # 文件修改时间（用于缓存验证）
 
 
 @dataclass
@@ -33,17 +36,63 @@ class RepoMap:
 
 
 class RepoMapBuilder:
-    """RepoMap 构建器"""
+    """RepoMap 构建器（带增量缓存）"""
 
     def __init__(self, root: Path):
         self.root = Path(root).resolve()
         self.scanner = ProjectScanner(self.root)
-        self._cache: dict[str, FileEntry] = {}  # 路径缓存
+        self._cache: dict[str, FileEntry] = {}  # 内存缓存
+        self._cache_file = self.root / ".devflow" / "repomap_cache.json"
+        self._load_cache()
+
+    def _load_cache(self):
+        """从磁盘加载缓存"""
+        if self._cache_file.exists():
+            try:
+                with open(self._cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for item in data.get("entries", []):
+                    entry = FileEntry(**item)
+                    self._cache[entry.path] = entry
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
+
+    def _save_cache(self):
+        """保存缓存到磁盘"""
+        self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "entries": [
+                {
+                    "path": e.path,
+                    "language": e.language,
+                    "symbols": [],  # 符号不持久化（太大）
+                    "summary": e.summary,
+                    "token_count": e.token_count,
+                    "imports": e.imports,
+                    "mtime": e.mtime,
+                }
+                for e in self._cache.values()
+            ]
+        }
+        with open(self._cache_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _is_cache_valid(self, path: str, mtime: float) -> bool:
+        """检查缓存是否有效（文件未修改且有 symbols）"""
+        if path not in self._cache:
+            return False
+        entry = self._cache[path]
+        # 如果缓存中没有 symbols（从磁盘加载的缓存），需要重新解析
+        if not entry.symbols:
+            return False
+        return entry.mtime == mtime
 
     def build(self, force: bool = False) -> RepoMap:
-        """构建完整的 RepoMap"""
+        """构建完整的 RepoMap（增量更新）"""
         ctx = self.scanner.scan()
         repomap = RepoMap(root=self.root)
+        cache_hits = 0
+        cache_misses = 0
 
         for f in ctx.files:
             if not f.is_text:
@@ -51,26 +100,41 @@ class RepoMapBuilder:
 
             provider = LanguageRegistry.detect(Path(f.relative))
             if not provider:
-                continue  # 跳过不支持的语言
+                continue
 
-            entry = self._build_entry(f, provider, force)
+            # 检查缓存有效性
+            file_path = self.root / f.relative
+            mtime = file_path.stat().st_mtime if file_path.exists() else 0
+
+            if not force and self._is_cache_valid(f.relative, mtime):
+                entry = self._cache[f.relative]
+                cache_hits += 1
+            else:
+                entry = self._build_entry(f, provider, mtime)
+                self._cache[f.relative] = entry
+                cache_misses += 1
+
             repomap.entries.append(entry)
             repomap.total_symbols += len(entry.symbols)
             repomap.total_tokens += entry.token_count
 
+        # 清理已删除文件的缓存
+        current_files = {f.relative for f in ctx.files}
+        for key in list(self._cache.keys()):
+            if key not in current_files:
+                del self._cache[key]
+
         # 构建依赖图
         repomap.dependencies = self._build_deps(repomap.entries)
+
+        # 保存缓存
+        self._save_cache()
+
         return repomap
 
     def _build_entry(self, f: FileInfo, provider: LanguageProvider,
-                     force: bool) -> FileEntry:
-        """构建单个文件条目（带缓存）"""
-        cache_key = str(f.relative)
-
-        # 检查缓存（基于文件修改时间）
-        if not force and cache_key in self._cache:
-            return self._cache[cache_key]
-
+                     mtime: float) -> FileEntry:
+        """构建单个文件条目"""
         # 解析文件
         result = provider.parse_file(self.root / f.relative)
 
@@ -87,11 +151,11 @@ class RepoMapBuilder:
             language=result.language,
             symbols=result.symbols,
             summary=summary,
-            token_count=f.size // 4,  # 估算 token 数
+            token_count=f.size // 4,
             imports=import_modules,
+            mtime=mtime,
         )
 
-        self._cache[cache_key] = entry
         return entry
 
     @staticmethod

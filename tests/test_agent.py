@@ -7,11 +7,11 @@ import asyncio
 import json
 from pathlib import Path
 
-import pytest
-
 from devflow.core.agent import Agent
-from devflow.core.planner import Planner, Plan, Step, StepType
-from devflow.tools.base import create_tool_registry, set_safe_root
+from devflow.core.planner import Planner, StepType
+from devflow.llm import ChatResponse, TokenUsage
+from devflow.tools import create_tool_registry
+from devflow.tools.base import set_safe_root
 
 
 class MockLLMClient:
@@ -23,37 +23,60 @@ class MockLLMClient:
         self.chat_calls: list[dict] = []
         self.exec_index = 0
 
-    def chat_for_planning(self, messages: list[dict]) -> dict:
+    def _wrap_response(self, data: dict) -> ChatResponse:
+        """包装为 ChatResponse"""
+        return ChatResponse(
+            data=data,
+            tokens=TokenUsage(),
+        )
+
+    def chat_for_planning(self, messages: list[dict]) -> ChatResponse:
         self.chat_calls.append({"mode": "planning", "messages": messages})
-        return {
+        return self._wrap_response({
             "choices": [{
                 "message": {
                     "content": self.plan_response,
                 }
             }]
-        }
+        })
 
-    def chat_for_execution(self, messages: list[dict], tools: list[dict]) -> dict:
+    def chat_for_execution(self, messages: list[dict], tools: list[dict]) -> ChatResponse:
         self.chat_calls.append({"mode": "execution", "messages": messages, "tools": tools})
         if self.exec_index < len(self.exec_responses):
             resp = self.exec_responses[self.exec_index]
             self.exec_index += 1
-            return resp
+            return self._wrap_response(resp)
         # 默认：最终回答
-        return {
+        return self._wrap_response({
             "choices": [{
                 "message": {
                     "content": "任务完成。",
                 }
             }]
-        }
+        })
 
 
 class TestAgentCoreLoop:
     """验证 Agent 核心循环"""
 
-    def test_planner_parse_steps(self):
-        """验证 Planner 能正确解析 LLM 响应"""
+    def test_planner_parse_json(self):
+        """验证 Planner 能从 JSON 解析步骤"""
+        client = MockLLMClient()
+        planner = Planner(client)
+
+        response = '''{"steps": [
+            {"index": 1, "type": "read", "description": "读取文件"},
+            {"index": 2, "type": "write", "description": "创建文件"},
+            {"index": 3, "type": "verify", "description": "验证"}
+        ]}'''
+        steps = planner._parse_steps_json(response)
+        assert len(steps) == 3
+        assert steps[0].type == StepType.READ
+        assert steps[1].type == StepType.WRITE
+        assert steps[2].type == StepType.VERIFY
+
+    def test_planner_parse_steps_legacy(self):
+        """验证 Planner 能正确解析旧版 LLM 响应"""
         client = MockLLMClient()
         planner = Planner(client)
 
@@ -62,7 +85,7 @@ class TestAgentCoreLoop:
 2. [write] 创建 src/api/health.py 实现健康检查端点
 3. [write] 修改 src/api/__init__.py 注册路由
 4. [verify] 运行 curl 验证端点返回 status ok"""
-        steps = planner._parse_steps(response)
+        steps = planner._parse_steps_legacy(response)
         assert len(steps) == 4
         assert steps[0].type == StepType.READ
         assert steps[1].type == StepType.WRITE
@@ -72,7 +95,7 @@ class TestAgentCoreLoop:
         """验证 Planner 在无结构化响应时的 fallback"""
         client = MockLLMClient()
         planner = Planner(client)
-        steps = planner._parse_steps("some unstructured response without proper format")
+        steps = planner._parse_steps_legacy("some unstructured response without proper format")
         assert len(steps) == 1
         assert steps[0].type == StepType.WRITE
 
@@ -255,7 +278,6 @@ class TestRepoMapAndParser:
 
     def test_python_parser_symbols(self):
         """验证 PythonProvider 正确提取函数和类"""
-        from pathlib import Path
         from devflow.repo.parser import PythonProvider
 
         p = PythonProvider()
@@ -267,7 +289,6 @@ class TestRepoMapAndParser:
 
     def test_python_parser_imports(self):
         """验证导入提取"""
-        from pathlib import Path
         from devflow.repo.parser import PythonProvider
 
         p = PythonProvider()
@@ -276,7 +297,6 @@ class TestRepoMapAndParser:
 
     def test_repomap_build(self):
         """验证 RepoMap 构建"""
-        from pathlib import Path
         from devflow.repo.repomap import RepoMapBuilder
 
         b = RepoMapBuilder(Path("D:/Aiagent/src/devflow"))
@@ -287,7 +307,6 @@ class TestRepoMapAndParser:
 
     def test_repomap_context_for_task(self):
         """验证 RepoMap 为任务生成上下文"""
-        from pathlib import Path
         from devflow.repo.repomap import RepoMapBuilder
 
         b = RepoMapBuilder(Path("D:/Aiagent/src/devflow"))
@@ -297,7 +316,6 @@ class TestRepoMapAndParser:
 
     def test_language_registry(self):
         """验证语言注册和检测"""
-        from pathlib import Path
         from devflow.repo.parser import LanguageRegistry
 
         py_provider = LanguageRegistry.get("python")

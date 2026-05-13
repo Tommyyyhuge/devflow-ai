@@ -175,19 +175,5 @@ class ToolRegistry:
         return tool.execute(**args)
 
 
-def create_tool_registry() -> ToolRegistry:
-    """创建并配置默认工具注册表"""
-    from devflow.tools.file_ops import EditFileTool, RunShellTool, SearchCodeTool
-    from devflow.tools.git_ops import GitDiffTool, GitLogTool, GitStatusTool
-
-    registry = ToolRegistry()
-    registry.register(ReadFileTool())
-    registry.register(WriteFileTool())
-    registry.register(ListDirTool())
-    registry.register(EditFileTool())
-    registry.register(RunShellTool())
-    registry.register(SearchCodeTool())
-    registry.register(GitDiffTool())
-    registry.register(GitLogTool())
-    registry.register(GitStatusTool())
-    return registry
+# create_tool_registry 已迁移到 devflow.tools.__init__.py
+# 使用自动发现机制替代手动注册
