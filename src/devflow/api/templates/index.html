@@ -5,6 +5,293 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DevFlow - AI 编程助手</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+// 加载历史会话
+async function loadHistory(){
+var list=document.getElementById('historyList');
+if(!list)return;
+try{
+var r=await fetch('/api/conversations');
+var d=await r.json();
+if(!d.conversations||d.conversations.length===0){
+list.innerHTML='<div style="color:var(--t3);font-size:13px;padding:20px 8px;text-align:center">暂无历史会话</div>';
+return;
+}
+var h='';
+d.conversations.forEach(function(c){
+var badge=c.success!==null?(c.success?'<span class="badge badge-success">成功</span>':'<span class="badge badge-fail">失败</span>'):'<span class="badge">进行中</span>';
+h+='<div class="history-item" onclick="loadConversation(\''+c.id+'\')">'+
+'<div class="task">'+c.task+'</div>'+
+'<div class="meta">'+badge+'<span>'+c.project+'</span></div>'+
+'</div>';
+});
+list.innerHTML=h;
+}catch(e){
+console.error('加载历史失败:',e);
+list.innerHTML='<div style="color:var(--rd);font-size:13px;padding:20px 8px;text-align:center">加载失败</div>';
+}
+}
+
+// 加载指定会话
+async function loadConversation(id){
+try{
+var r=await fetch('/api/conversations/'+id);
+var d=await r.json();
+if(d.error)return;
+document.getElementById('input').value=d.task;
+if(d.messages&&d.messages.length>0){
+var lastMsg=d.messages[d.messages.length-1];
+if(lastMsg.role==='system'&&lastMsg.metadata&&lastMsg.metadata.type==='completed'){
+document.getElementById('rTitle').innerHTML='<span style="color:var(--gr)">✓ 已完成</span>';
+}
+}
+document.querySelectorAll('.history-item').forEach(function(el){el.classList.remove('active')});
+event.currentTarget.classList.add('active');
+}catch(e){console.error(e)}
+}
+
+// 页面加载完成后获取历史
+document.addEventListener('DOMContentLoaded', loadHistory);
+
+// 加载文件树
+async function loadFileTree(path){
+var tree=document.getElementById('fileTree');
+if(!tree)return;
+try{
+var r=await fetch('/api/files?path='+encodeURIComponent(path||''));
+var d=await r.json();
+if(d.error){tree.innerHTML='<div style="color:var(--rd);font-size:13px;padding:20px 8px;text-align:center">'+d.error+'</div>';return;}
+if(d.type==='file'){return;}
+tree.innerHTML=renderTree(d.items,path||'');
+}catch(e){console.error('加载文件树失败:',e);}
+}
+
+// 渲染文件树
+function renderTree(items,basePath){
+if(!items||items.length===0)return'<div style="color:var(--t3);font-size:13px;padding:20px 8px;text-align:center">空文件夹</div>';
+var h='<ul class="file-tree">';
+items.forEach(function(item){
+var icon=item.type==='directory'?'📁':'📄';
+var fullPath=basePath?basePath+'/'+item.name:item.name;
+if(item.type==='directory'){
+h+='<li class="directory" onclick="toggleDir(this,''+fullPath+'')">'+
+'<span class="toggle">▶</span><span class="icon">'+icon+'</span><span>'+item.name+'</span>'+
+'<ul class="children" style="display:none"></ul></li>';
+}else{
+h+='<li class="file" onclick="openFile(''+fullPath+'')">'+
+'<span class="toggle"></span><span class="icon">'+icon+'</span><span>'+item.name+'</span></li>';
+}
+});
+h+='</ul>';
+return h;
+}
+
+// 展开/折叠目录
+async function toggleDir(li,path){
+var children=li.querySelector('.children');
+var toggle=li.querySelector('.toggle');
+if(!children||!toggle)return;
+if(children.style.display==='none'){
+try{
+var r=await fetch('/api/files?path='+encodeURIComponent(path));
+var d=await r.json();
+if(d.items){children.innerHTML=renderTree(d.items,path);}
+children.style.display='block';
+toggle.textContent='▼';
+}catch(e){console.error(e);}
+}else{
+children.style.display='none';
+toggle.textContent='▶';
+}
+}
+
+// 打开文件
+var currentEditPath='';
+async function openFile(path){
+try{
+var r=await fetch('/api/files/content?path='+encodeURIComponent(path));
+var d=await r.json();
+if(d.error){alert(d.error);return;}
+currentEditPath=path;
+document.getElementById('editorFileName').textContent=path;
+document.getElementById('editorContent').value=d.content||'';
+document.getElementById('editorCard').style.display='block';
+}catch(e){console.error(e);}
+}
+
+// 保存文件
+async function saveFile(){
+if(!currentEditPath)return;
+try{
+var content=document.getElementById('editorContent').value;
+var r=await fetch('/api/files/content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:currentEditPath,content:content})});
+var d=await r.json();
+if(d.success){
+alert('保存成功');
+}else{
+alert('保存失败: '+(d.error||'未知错误'));
+}
+}catch(e){console.error(e);}
+}
+
+// 关闭编辑器
+function closeEditor(){
+document.getElementById('editorCard').style.display='none';
+currentEditPath='';
+}
+
+// 右键菜单
+var contextPath='';
+var contextType='';
+function showContext(event,path,type){
+event.preventDefault();
+event.stopPropagation();
+contextPath=path;
+contextType=type;
+var menu=document.getElementById('contextMenu');
+menu.style.display='block';
+menu.style.left=event.clientX+'px';
+menu.style.top=event.clientY+'px';
+}
+
+// 点击其他地方关闭菜单
+document.addEventListener('click',function(){
+var menu=document.getElementById('contextMenu');
+if(menu)menu.style.display='none';
+});
+
+// 新建文件
+async function newFile(){
+if(!contextPath)return;
+var name=prompt('文件名:');
+if(!name)return;
+try{
+var dir=contextType==='directory'?contextPath:contextPath.substring(0,contextPath.lastIndexOf('/'));
+var newPath=dir?dir+'/'+name:name;
+var r=await fetch('/api/files/content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:newPath,content:''})});
+var d=await r.json();
+if(d.success){loadFileTree(currentProject);}else{alert(d.error||'创建失败');}
+}catch(e){console.error(e);}
+}
+
+// 新建文件夹
+async function newFolder(){
+if(!contextPath)return;
+var name=prompt('文件夹名:');
+if(!name)return;
+try{
+var dir=contextType==='directory'?contextPath:contextPath.substring(0,contextPath.lastIndexOf('/'));
+var newPath=dir?dir+'/'+name:name;
+// 创建一个空文件作为标记，然后删除（模拟创建文件夹）
+var r=await fetch('/api/files/content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:newPath+'/.gitkeep',content:''})});
+var d=await r.json();
+if(d.success){loadFileTree(currentProject);}else{alert(d.error||'创建失败');}
+}catch(e){console.error(e);}
+}
+
+// 重命名
+async function renameItem(){
+if(!contextPath)return;
+var name=prompt('新名称:',contextPath.split('/').pop());
+if(!name)return;
+try{
+var dir=contextPath.substring(0,contextPath.lastIndexOf('/'));
+var newPath=dir?dir+'/'+name:name;
+var r=await fetch('/api/files/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old_path:contextPath,new_path:newPath})});
+var d=await r.json();
+if(d.success){loadFileTree(currentProject);}else{alert(d.error||'重命名失败');}
+}catch(e){console.error(e);}
+}
+
+// 删除
+async function deleteItem(){
+if(!contextPath)return;
+if(!confirm('确定删除 '+contextPath+' ?'))return;
+try{
+var r=await fetch('/api/files?path='+encodeURIComponent(contextPath),{method:'DELETE'});
+var d=await r.json();
+if(d.success){loadFileTree(currentProject);}else{alert(d.error||'删除失败');}
+}catch(e){console.error(e);}
+}
+
+// 拖拽上传
+function handleDragOver(event){
+event.preventDefault();
+event.stopPropagation();
+var tree=document.getElementById('fileTree');
+if(tree)tree.classList.add('drag-over');
+}
+
+function handleDragLeave(event){
+event.preventDefault();
+event.stopPropagation();
+var tree=document.getElementById('fileTree');
+if(tree)tree.classList.remove('drag-over');
+}
+
+async function handleDrop(event){
+event.preventDefault();
+event.stopPropagation();
+var tree=document.getElementById('fileTree');
+if(tree)tree.classList.remove('drag-over');
+
+var files=event.dataTransfer.files;
+if(!files||files.length===0)return;
+
+for(var i=0;i<files.length;i++){
+var file=files[i];
+if(file.type.startsWith('text/')||file.name.endsWith('.py')||file.name.endsWith('.js')||file.name.endsWith('.html')||file.name.endsWith('.css')||file.name.endsWith('.md')||file.name.endsWith('.json')||file.name.endsWith('.yml')||file.name.endsWith('.yaml')){
+try{
+var text=await file.text();
+var path=currentProject?currentProject+'/'+file.name:file.name;
+var r=await fetch('/api/files/content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path,content:text})});
+var d=await r.json();
+if(d.success){
+console.log('上传成功:',file.name);
+}else{
+console.error('上传失败:',file.name,d.error);
+}
+}catch(e){console.error('上传错误:',e);}
+}else{
+alert('暂不支持的文件类型: '+file.name);
+}
+}
+
+// 刷新文件树
+if(currentProject){loadFileTree(currentProject);}
+}
+
+
+
+// 搜索文件
+async function searchFiles(query){
+if(!query){if(currentProject){loadFileTree(currentProject);}return;}
+var tree=document.getElementById('fileTree');
+try{
+var r=await fetch('/api/files/search?q='+encodeURIComponent(query)+'&path='+encodeURIComponent(currentProject||''));
+var d=await r.json();
+if(d.results&&d.results.length>0){
+var h='<ul class="file-tree">';
+d.results.forEach(function(f){
+h+='<li class="file" onclick="openFile(''+f.path+'')">'+
+'<span class="toggle"></span><span class="icon">📄</span><span>'+f.name+'</span></li>';
+});
+h+='</ul>';
+tree.innerHTML=h;
+}else{
+tree.innerHTML='<div style="color:var(--t3);font-size:13px;padding:20px 8px;text-align:center">未找到文件</div>';
+}
+}catch(e){console.error(e);}
+}
+
+// 选择项目时加载文件树
+var originalOnProjectChange=onProjectChange;
+onProjectChange=function(){
+originalOnProjectChange();
+if(currentProject){loadFileTree(currentProject);}
+};
+
+</script>
 <style>
 :root{--bg:#0a0a0a;--s1:#111;--s2:#1a1a1a;--s3:#252525;--bdr:#2a2a2a;--t1:#ededed;--t2:#999;--t3:#666;--ac:#3b82f6;--gr:#10b981;--rd:#ef4444;--r:14px}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -64,13 +351,85 @@ textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(59,
 .errors{margin-top:12px;font-size:14px;color:var(--rd)}.errors div{padding:4px 0}
 
 footer{text-align:center;padding:32px;font-size:13px;color:var(--t3)}
+
+/* 侧边栏 */
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:260px;background:var(--s1);border-right:1px solid var(--bdr);padding:20px 16px;overflow-y:auto;z-index:100}
+.sidebar h4{font-size:14px;font-weight:600;color:var(--t3);margin-bottom:12px;padding:0 8px}
+.history-item{padding:10px 12px;border-radius:8px;margin-bottom:4px;cursor:pointer;transition:all .15s;font-size:13px}
+.history-item:hover{background:var(--s2)}
+.history-item.active{background:var(--s3)}
+.history-item .task{color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:2px}
+.history-item .meta{color:var(--t3);font-size:11px;display:flex;gap:8px}
+.history-item .badge{font-size:10px;padding:1px 6px;border-radius:4px}
+.badge-success{background:rgba(16,185,129,.15);color:var(--gr)}
+.badge-fail{background:rgba(239,68,68,.15);color:var(--rd)}
+.main-content{margin-left:260px}
+
+/* 文件树 */
+.sidebar-section{margin-top:24px;padding-top:20px;border-top:1px solid var(--bdr)}
+.sidebar-section h4{font-size:14px;font-weight:600;color:var(--t3);margin-bottom:12px;padding:0 8px}
+.search-box{padding:0 8px;margin-bottom:10px}
+.search-box input{width:100%;background:var(--bg);color:var(--t1);border:1px solid var(--bdr);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px}
+.search-box input:focus{outline:none;border-color:var(--ac)}
+.file-tree{list-style:none;padding:0;margin:0;font-size:13px}
+.file-tree li{padding:4px 8px;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:6px}
+.file-tree li:hover{background:var(--s2)}
+.file-tree li.directory{font-weight:500;color:var(--t2)}
+.file-tree li.file{color:var(--t3)}
+.file-tree li .icon{font-size:14px}
+.file-tree .children{padding-left:16px}
+.file-tree .toggle{width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;font-size:10px;color:var(--t3)}
+
+/* 文件编辑器 */
+.editor-card{display:none}
+.editor-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.editor-header h3{font-size:14px;font-weight:600;color:var(--t2);display:flex;align-items:center;gap:8px}
+.editor-header .actions{display:flex;gap:8px}
+.editor-header .btn-sm{font-size:12px;padding:6px 14px;background:var(--s3);color:var(--t2);border:1px solid var(--bdr);border-radius:6px;cursor:pointer;transition:all .12s}
+.editor-header .btn-sm:hover{color:var(--t1);border-color:var(--t3)}
+.editor-header .btn-sm.primary{background:var(--ac);color:#fff;border-color:var(--ac)}
+.editor-header .btn-sm.primary:hover{filter:brightness(1.1)}
+.editor-content{width:100%;background:var(--bg);color:var(--t1);border:1px solid var(--bdr);border-radius:10px;padding:16px 18px;font-family:"SF Mono","Fira Code",monospace;font-size:13px;resize:vertical;min-height:300px;max-height:500px;line-height:1.7;tab-size:4}
+.editor-content:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(59,130,246,.1)}
+
+/* 右键菜单 */
+.context-menu{position:fixed;background:var(--s1);border:1px solid var(--bdr);border-radius:8px;padding:6px 0;min-width:140px;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,.3);display:none}
+.context-menu-item{padding:8px 16px;font-size:13px;color:var(--t2);cursor:pointer;transition:all .1s}
+.context-menu-item:hover{background:var(--s2);color:var(--t1)}
+.context-menu-item.delete{color:var(--rd)}
+.context-menu-item.delete:hover{background:rgba(239,68,68,.1)}
+.context-menu-separator{height:1px;background:var(--bdr);margin:4px 0}
+
+/* 拖拽上传 */
+.file-tree.drag-over{background:rgba(59,130,246,.08);border:2px dashed var(--ac);border-radius:8px}
+.upload-hint{display:none;text-align:center;padding:20px;color:var(--ac);font-size:13px}
+.file-tree.drag-over .upload-hint{display:block}
 </style>
 </head>
 <body>
 <nav>
 <div class="logo">Dev<span>Flow</span><span class="v">v0.1</span></div>
-<div class="status">周预算 $20 · 5小时 $3.5 · V4 Flash</div>
+<div class="status" id="gitStatus" style="margin-left:auto;margin-right:20px;font-size:12px;display:flex;gap:12px;align-items:center"><span id="gitBranch">分支: --</span><span id="gitDirty" style="display:none">有未提交改动</span></div><div class="status">周预算 $20 · 5小时 $3.5 · V4 Flash</div>
 </nav>
+
+<div class="sidebar" id="sidebar">
+<h4>📜 历史会话</h4>
+<div id="historyList">
+  <div style="color:var(--t3);font-size:13px;padding:20px 8px;text-align:center">加载中...</div>
+</div>
+
+<div class="sidebar-section">
+<h4>📁 文件管理</h4>
+<div class="search-box">
+<input type="text" id="fileSearch" placeholder="搜索文件..." onkeyup="searchFiles(this.value)">
+</div>
+<div id="fileTree" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+  <div style="color:var(--t3);font-size:13px;padding:20px 8px;text-align:center">选择项目加载文件</div>
+</div>
+</div>
+
+</div>
+<div class="main-content">
 <div class="container">
 
 <div class="card">
@@ -101,6 +460,17 @@ footer{text-align:center;padding:32px;font-size:13px;color:var(--t3)}
 </div>
 </div>
 
+
+<div class="card editor-card" id="editorCard">
+<div class="editor-header">
+<h3>📝 <span id="editorFileName">未命名</span></h3>
+<div class="actions">
+<button class="btn-sm" onclick="closeEditor()">关闭</button>
+<button class="btn-sm primary" onclick="saveFile()">保存</button>
+</div>
+</div>
+<textarea class="editor-content" id="editorContent" spellcheck="false"></textarea>
+</div>
 <div class="card" style="display:none" id="resultCard">
 <h3 id="rTitle"></h3>
 <div class="progress-wrap" id="progressWrap" style="display:none"><div class="progress-fill" id="progress" style="width:0"></div></div>
@@ -219,6 +589,59 @@ catch(e){document.getElementById('rTitle').innerHTML='错误: '+e.message;docume
 btn.disabled=false;btn.innerHTML='开始执行';
 }
 document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();run()}});
+
+// 加载历史会话
+async function loadHistory(){
+var list=document.getElementById('historyList');
+try{
+var r=await fetch('/api/conversations');
+var d=await r.json();
+if(!d.conversations||d.conversations.length===0){
+list.innerHTML='<div style="color:var(--t3);font-size:13px;padding:20px 8px;text-align:center">暂无历史会话</div>';
+return;
+}
+var h='';
+d.conversations.forEach(function(c){
+var badge=c.success!==null?(c.success?'<span class="badge badge-success">成功</span>':'<span class="badge badge-fail">失败</span>'):'<span class="badge">进行中</span>';
+h+='<div class="history-item" onclick="loadConversation(''+c.id+'')">'+
+'<div class="task">'+c.task+'</div>'+
+'<div class="meta">'+badge+'<span>'+c.project+'</span></div>'+
+'</div>';
+});
+list.innerHTML=h;
+}catch(e){
+list.innerHTML='<div style="color:var(--rd);font-size:13px;padding:20px 8px;text-align:center">加载失败</div>';
+}
+}
+
+// 加载指定会话
+async function loadConversation(id){
+try{
+var r=await fetch('/api/conversations/'+id);
+var d=await r.json();
+if(d.error)return;
+// 显示会话详情（简化版）
+document.getElementById('input').value=d.task;
+if(d.messages&&d.messages.length>0){
+var lastMsg=d.messages[d.messages.length-1];
+if(lastMsg.role==='system'&&lastMsg.metadata&&lastMsg.metadata.type==='completed'){
+document.getElementById('rTitle').innerHTML='<span style="color:var(--gr)">✓ 已完成</span>';
+}
+}
+// 高亮当前项
+document.querySelectorAll('.history-item').forEach(function(el){el.classList.remove('active')});
+event.currentTarget.classList.add('active');
+}catch(e){console.error(e)}
+}
+
+// 页面加载时获取历史
+loadHistory();
 </script>
-</body>
+<div class="context-menu" id="contextMenu">
+<div class="context-menu-item" onclick="newFile()">📄 新建文件</div>
+<div class="context-menu-item" onclick="newFolder()">📁 新建文件夹</div>
+<div class="context-menu-separator"></div>
+<div class="context-menu-item" onclick="renameItem()">✏️ 重命名</div>
+<div class="context-menu-item delete" onclick="deleteItem()">🗑️ 删除</div>
+</div></body>
 </html>

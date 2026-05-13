@@ -103,11 +103,12 @@ class TestAgentCoreLoop:
         """验证 6 个工具全部注册且有正确的 OpenAI schema"""
         registry = create_tool_registry()
         schemas = registry.get_schemas()
-        assert len(schemas) == 9
+        assert len(schemas) == 11
 
         expected_tools = {"read_file", "write_file", "list_dir",
                           "edit_file", "run_shell", "search_code",
-                          "git_diff", "git_log", "git_status"}
+                          "git_diff", "git_log", "git_status",
+                          "git_branch", "git_commit"}
         actual_tools = {s["function"]["name"] for s in schemas}
         assert actual_tools == expected_tools
 

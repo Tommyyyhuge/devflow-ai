@@ -12,6 +12,7 @@ import structlog
 from devflow.core.executor import Executor, StepResult
 from devflow.core.planner import Plan, Planner, Step
 from devflow.core.verifier import Verdict, Verifier
+from devflow.history.store import ConversationStore
 
 logger = structlog.get_logger()
 
@@ -55,10 +56,47 @@ class Agent:
                          current=current, budget=budget)
         return True
 
-    async def run(self, task: str, repo_path: str | Path = ".") -> TaskResult:
-        """执行完整的 AI 编程任务"""
+    async def run(self, task: str, repo_path: str | Path = ".",
+                  conversation_id: str | None = None) -> TaskResult:
+        """执行完整的 AI 编程任务
+
+        Args:
+            task: 任务描述
+            repo_path: 项目路径
+            conversation_id: 可选，关联到已有会话（用于恢复）
+        """
         repo_path = Path(repo_path).resolve()
         logger.info("开始执行任务", task=task[:100], repo_path=str(repo_path))
+
+        # 初始化对话历史存储
+        store = ConversationStore()
+        conv_id = conversation_id
+
+        # 如果没有提供会话 ID，创建新会话
+        if not conv_id:
+            project_name = repo_path.name
+            conv = store.create_conversation(project_name, task)
+            conv_id = conv.id
+            logger.info("创建会话", conversation_id=conv_id)
+
+        # 添加用户任务消息
+        store.add_message(conv_id, "user", task)
+
+        # --- Git 工作流：创建 feature 分支 ---
+        import re
+        branch_name = "feat/" + re.sub(r'[^\w\s-]', '', task.lower())[:30].replace(' ', '-')
+        try:
+            import git
+            repo = git.Repo(repo_path, search_parent_directories=True)
+            if not repo.is_dirty():
+                # 只有工作区干净时才创建新分支
+                new_branch = repo.create_head(branch_name)
+                new_branch.checkout()
+                logger.info("创建 feature 分支", branch=branch_name)
+                store.add_message(conv_id, "system", f"创建分支: {branch_name}",
+                                metadata={"type": "git_branch", "branch": branch_name})
+        except Exception as e:
+            logger.warning("创建分支失败", error=str(e))
 
         # 1. 收集项目上下文（Week 2 升级：使用 RepoMap）
         from devflow.repo.repomap import RepoMapBuilder
@@ -71,10 +109,18 @@ class Agent:
             ctx = cb.build(task)
             context = self._format_context(ctx)
 
+        # 更新状态为执行中
+        store.update_status(conv_id, "running")
+
         # 2. 规划
         logger.info("开始规划任务")
         plan = self.planner.plan(task, context)
         logger.info("规划完成", step_count=len(plan.steps))
+
+        # 添加规划消息
+        plan_text = "\n".join([f"{s.index}. [{s.type.value}] {s.description}" for s in plan.steps])
+        store.add_message(conv_id, "assistant", f"执行计划：\n{plan_text}",
+                         metadata={"type": "plan", "step_count": len(plan.steps)})
 
         # 3. 逐步执行
         step_results: list[StepResult] = []
@@ -84,12 +130,17 @@ class Agent:
         for step in plan.steps:
             # Token 预算检查
             if not self._check_token_budget(total_tokens):
+                error_msg = f"Token 预算已耗尽（已使用 {total_tokens} tokens）"
+                store.update_status(conv_id, "failed", error=error_msg,
+                                  total_tokens=total_tokens)
+                store.add_message(conv_id, "system", error_msg,
+                                metadata={"type": "budget_exceeded"})
                 return TaskResult(
                     success=False,
                     task=task,
                     plan=plan,
                     step_results=step_results,
-                    error=f"Token 预算已耗尽（已使用 {total_tokens} tokens）",
+                    error=error_msg,
                     files_modified=all_files_modified,
                     total_tokens=total_tokens,
                 )
@@ -104,6 +155,18 @@ class Agent:
             step_results.append(result)
             total_tokens += result.tokens_used
 
+            # 添加步骤执行消息
+            store.add_message(
+                conv_id, "tool",
+                f"步骤 {step.index}: {result.output[:200]}" if result.success else f"失败: {result.error}",
+                metadata={
+                    "type": "step_result",
+                    "step_index": step.index,
+                    "success": result.success,
+                    "tokens": result.tokens_used,
+                }
+            )
+
             if result.files_modified:
                 all_files_modified.extend(result.files_modified)
                 logger.info("步骤修改了文件",
@@ -114,6 +177,10 @@ class Agent:
                 logger.error("步骤失败，终止任务",
                            step_index=step.index,
                            error=result.error)
+                store.update_status(conv_id, "failed", success=False,
+                                  error=result.error, total_tokens=total_tokens,
+                                  files_modified=all_files_modified)
+                store.add_message(conv_id, "system", f"任务失败: {result.error}")
                 return TaskResult(
                     success=False,
                     task=task,
@@ -135,6 +202,35 @@ class Agent:
         vr = self.verifier.verify_files(all_files_modified)
 
         success = vr.passed and all(sr.success for sr in step_results)
+
+        # 更新会话状态为完成
+        store.update_status(conv_id, "completed", success=success,
+                          total_tokens=total_tokens,
+                          files_modified=all_files_modified)
+
+        # 添加完成消息
+        if success:
+            store.add_message(conv_id, "system", "任务完成", metadata={"type": "completed"})
+        else:
+            errors = [e.message for e in vr.errors] if vr else []
+            store.add_message(conv_id, "system", f"验证失败: {', '.join(errors)}",
+                            metadata={"type": "verification_failed", "errors": errors})
+
+        # --- Git 工作流：自动提交 ---
+        if all_files_modified:
+            try:
+                import git
+                repo = git.Repo(repo_path, search_parent_directories=True)
+                if repo.is_dirty(untracked_files=True):
+                    repo.git.add(".")
+                    commit_msg = f"{'feat' if success else 'wip'}: {task[:50]}"
+                    repo.index.commit(commit_msg)
+                    logger.info("自动提交代码", commit_msg=commit_msg)
+                    store.add_message(conv_id, "system", f"提交代码: {commit_msg}",
+                                    metadata={"type": "git_commit", "message": commit_msg})
+            except Exception as e:
+                logger.warning("自动提交失败", error=str(e))
+
         logger.info("任务完成",
                    success=success,
                    total_steps=len(step_results),
