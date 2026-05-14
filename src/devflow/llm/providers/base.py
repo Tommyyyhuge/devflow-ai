@@ -3,6 +3,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from devflow.core.events import EventBus, EventType
+from devflow.llm.cost_tracker import CostTracker
+
 
 @dataclass
 class TokenUsage:
@@ -26,6 +29,43 @@ class LLMProvider(ABC):
 
     所有 LLM 提供商必须实现此接口。
     """
+
+    def __init__(self) -> None:
+        """初始化成本追踪器和事件总线。"""
+        self.cost_tracker = CostTracker()
+        self.event_bus = EventBus()
+
+    def chat_with_cost(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        thinking: bool = False,
+        temperature: float = 0.0,
+    ) -> ChatResponse:
+        """带成本追踪的聊天接口。"""
+        # 触发开始事件
+        self.event_bus.emit(EventType.LLM_CALL_START, {
+            "model": self.config.model,
+        })
+
+        # 执行实际调用
+        response = self.chat(messages, tools, thinking, temperature)
+
+        # 计算成本
+        tokens = response.tokens
+        breakdown = self.cost_tracker.calculate(
+            prompt_tokens=tokens.prompt_tokens,
+            completion_tokens=tokens.completion_tokens,
+            model_name=self.config.model,
+        )
+
+        # 触发结束事件
+        self.event_bus.emit(EventType.LLM_CALL_END, {
+            "model": self.config.model,
+            "cost_breakdown": breakdown,
+        })
+
+        return response
 
     @abstractmethod
     def chat(

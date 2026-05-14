@@ -25,6 +25,7 @@ class OpenAIProvider(LLMProvider):
     """OpenAI 兼容协议的 LLM Provider。"""
 
     def __init__(self, config: LLMConfig):
+        super().__init__()
         self.config = config
         self.client = OpenAI(
             api_key=config.api_key.get_secret_value(),
