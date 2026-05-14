@@ -3,7 +3,7 @@
 from enum import Enum, auto
 
 from devflow.config import LLMConfig
-from devflow.llm.providers.base import LLMProvider
+from devflow.llm.providers.base import ChatResponse, LLMProvider
 from devflow.llm.providers.openai import OpenAIProvider
 
 
@@ -70,3 +70,40 @@ class SmartRouter:
         
         # 规则 3：默认中等复杂度
         return TaskComplexity.MEDIUM
+
+    def chat_for_planning(self, messages: list[dict]) -> ChatResponse:
+        """规划模式 — 自动路由到合适的 Provider。
+
+        Args:
+            messages: 对话消息列表
+
+        Returns:
+            ChatResponse: LLM 响应
+        """
+        prompt = self._extract_prompt(messages)
+        provider = self.route(prompt)
+        return provider.chat_for_planning(messages)
+
+    def chat_for_execution(
+        self, messages: list[dict], tools: list[dict]
+    ) -> ChatResponse:
+        """执行模式 — 自动路由到合适的 Provider。
+
+        Args:
+            messages: 对话消息列表
+            tools: 工具模式列表
+
+        Returns:
+            ChatResponse: LLM 响应
+        """
+        prompt = self._extract_prompt(messages)
+        provider = self.route(prompt)
+        return provider.chat_for_execution(messages, tools)
+
+    def _extract_prompt(self, messages: list[dict]) -> str:
+        """从消息列表中提取用户提示文本用于路由判断。"""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                return content if isinstance(content, str) else str(content)
+        return ""

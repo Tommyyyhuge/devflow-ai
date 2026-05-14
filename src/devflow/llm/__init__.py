@@ -4,7 +4,11 @@
 """
 
 from devflow.llm.cost_tracker import CostBreakdown, CostTracker
-from devflow.llm.factory import create_llm_provider, list_supported_providers
+from devflow.llm.factory import (
+    create_llm_provider,
+    create_smart_router,
+    list_supported_providers,
+)
 from devflow.llm.providers.base import ChatResponse, LLMProvider, TokenUsage
 from devflow.llm.providers.openai import OpenAIProvider
 
@@ -13,6 +17,7 @@ __all__ = [
     "CostBreakdown",
     "CostTracker",
     "create_llm_provider",
+    "create_smart_router",
     "LLMProvider",
     "list_supported_providers",
     "OpenAIProvider",

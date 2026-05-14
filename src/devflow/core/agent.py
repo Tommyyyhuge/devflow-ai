@@ -13,6 +13,7 @@ from devflow.core.executor import Executor, StepResult
 from devflow.core.planner import Plan, Planner, Step
 from devflow.core.verifier import Verdict, Verifier
 from devflow.history.store import ConversationStore
+from devflow.llm.factory import create_llm_provider, create_smart_router
 
 logger = structlog.get_logger()
 
@@ -33,12 +34,18 @@ class TaskResult:
 class Agent:
     """DevFlow Agent 主类"""
 
-    def __init__(self, llm_client, tools, config=None):
-        self.llm = llm_client
+    def __init__(self, llm_client=None, tools=None, config=None):
         self.tools = tools
         self.config = config
-        self.planner = Planner(llm_client)
-        self.executor = Executor(llm_client, tools)
+
+        # 智能路由：根据配置自动选择 Provider 创建方式
+        if config is not None and config.router.enabled:
+            self.llm = create_smart_router(config.llm)
+        else:
+            self.llm = llm_client
+
+        self.planner = Planner(self.llm)
+        self.executor = Executor(self.llm, tools)
         self.verifier = Verifier()
 
     def _check_token_budget(self, current: int) -> bool:

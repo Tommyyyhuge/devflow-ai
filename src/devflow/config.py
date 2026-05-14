@@ -45,12 +45,25 @@ class BudgetConfig(BaseSettings):
     budget_per_5h: float = 3.5
 
 
+class RouterConfig(BaseSettings):
+    """智能路由配置"""
+    model_config = SettingsConfigDict(
+        env_prefix="DEVFLOW_ROUTER_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+    enabled: bool = True
+    strategy: str = "smart"  # "smart" | "cheapest" | "fastest"
+
+
 class DevFlowConfig(BaseSettings):
     """DevFlow 总配置"""
     model_config = SettingsConfigDict(env_prefix="DEVFLOW_")
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    router: RouterConfig = Field(default_factory=RouterConfig)
     log_level: str = "INFO"
 
 

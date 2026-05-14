@@ -3,6 +3,7 @@
 from devflow.config import LLMConfig
 from devflow.llm.providers.base import LLMProvider
 from devflow.llm.providers.openai import OpenAIProvider
+from devflow.llm.router import SmartRouter
 
 # 注册表：provider 名称 → 实现类
 _PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {
@@ -30,6 +31,18 @@ def create_llm_provider(config: LLMConfig) -> LLMProvider:
 
     # 默认使用 OpenAI 兼容协议
     return OpenAIProvider(config)
+
+
+def create_smart_router(config: LLMConfig) -> SmartRouter:
+    """创建智能路由器，根据任务复杂度自动选择最优 Provider。
+
+    Args:
+        config: LLM 基础配置
+
+    Returns:
+        SmartRouter 实例
+    """
+    return SmartRouter(config)
 
 
 def list_supported_providers() -> list[str]:
