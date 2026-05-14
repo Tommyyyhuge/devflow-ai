@@ -156,9 +156,14 @@ class Agent:
             total_tokens += result.tokens_used
 
             # 添加步骤执行消息
+            msg = (
+                f"步骤 {step.index}: {result.output[:200]}"
+                if result.success
+                else f"失败: {result.error}"
+            )
             store.add_message(
                 conv_id, "tool",
-                f"步骤 {step.index}: {result.output[:200]}" if result.success else f"失败: {result.error}",
+                msg,
                 metadata={
                     "type": "step_result",
                     "step_index": step.index,

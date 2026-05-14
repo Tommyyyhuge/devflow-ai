@@ -8,7 +8,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from devflow.config import load_config
 from devflow.core.agent import Agent
 from devflow.history.store import ConversationStore
-from devflow.llm import DeepSeekClient
+from devflow.llm import create_llm_provider
 from devflow.tools import create_tool_registry
 from devflow.tools.base import _safe_path, set_safe_root
 
@@ -26,6 +26,16 @@ UPLOADS.mkdir(exist_ok=True)
 
 # 模板目录
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+def get_agent() -> Agent:
+    """FastAPI 依赖注入：创建并返回 Agent 实例。"""
+    config = load_config()
+    if not config.llm.api_key.get_secret_value():
+        raise HTTPException(status_code=400, detail="请设置 DEEPSEEK_API_KEY")
+    llm_provider = create_llm_provider(config.llm)
+    tools = create_tool_registry()
+    return Agent(llm_provider, tools, config=config)
 
 
 class TaskRequest(BaseModel):
@@ -108,22 +118,33 @@ async def delete_project(name: str):
 
 
 @app.post("/api/run")
-async def run_task(req: TaskRequest):
-    config = load_config()
-    if not config.llm.api_key.get_secret_value():
-        return JSONResponse({"error": "请设置 DEEPSEEK_API_KEY"}, status_code=400)
-
+async def run_task(req: TaskRequest, agent: Agent = Depends(get_agent)):
     repo_path = UPLOADS / req.project if req.project else Path(".").resolve()
     set_safe_root(repo_path)
-    client = DeepSeekClient(config.llm)
-    tools = create_tool_registry()
-    agent = Agent(client, tools, config=config)
     result = await agent.run(req.task, repo_path)
+    steps = []
+    if result.plan:
+        steps = [
+            {
+                "index": sr.step.index,
+                "description": sr.step.description[:120],
+                "success": sr.success,
+                "output": (sr.output or "")[:300],
+            }
+            for sr in result.step_results
+        ]
+    verify_errors = []
+    if result.verify_result:
+        verify_errors = [e.message for e in result.verify_result.errors]
     return {
-        "success": result.success, "error": result.error,
-        "steps": [{"index": sr.step.index, "description": sr.step.description[:120], "success": sr.success, "output": (sr.output or "")[:300]} for sr in result.step_results] if result.plan else [],
+        "success": result.success,
+        "error": result.error,
+        "steps": steps,
         "files_modified": result.files_modified,
-        "verify": {"passed": result.verify_result.passed if result.verify_result else True, "errors": [e.message for e in result.verify_result.errors] if result.verify_result else []},
+        "verify": {
+            "passed": result.verify_result.passed if result.verify_result else True,
+            "errors": verify_errors,
+        },
     }
 
 

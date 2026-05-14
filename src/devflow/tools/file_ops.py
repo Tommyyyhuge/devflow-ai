@@ -62,8 +62,11 @@ class RunShellTool(Tool):
     3. 黑名单作为兜底防护
     """
     name = "run_shell"
-    description = ("执行 Shell 命令并返回输出。超时 30 秒。"
-                   "只允许安全命令：python, pytest, pip, git, ls, cat, grep, find, curl, mkdir, touch, echo, wc, head, tail, pwd")
+    description = (
+        "执行 Shell 命令并返回输出。超时 30 秒。"
+        "只允许安全命令：python, pytest, pip, git, ls, cat, grep, find, "
+        "curl, mkdir, touch, echo, wc, head, tail, pwd"
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -102,6 +105,13 @@ class RunShellTool(Tool):
         "bash", "sh", "zsh", "fish", "dash", "ksh",
         "eval", "exec", "source", ".",
     ])
+
+    # 危险参数检查：命令名 → 禁止参数正则列表
+    DANGEROUS_ARGUMENTS = {
+        "python": [r"\s+-c\s+", r"\s+-m\s+subprocess", r"\s+-m\s+os"],
+        "python3": [r"\s+-c\s+", r"\s+-m\s+subprocess", r"\s+-m\s+os"],
+        "git": [r"\s+-c\s+\w+\.\w+\s*="],
+    }
 
     def _extract_base_command(self, command: str) -> str:
         """提取命令的基础名称（处理 sudo、路径等）"""
@@ -150,6 +160,15 @@ class RunShellTool(Tool):
                 f"命令 '{base}' 不在白名单中。"
                 f"允许: {', '.join(sorted(self.ALLOWED_COMMANDS))}"
             )
+
+        # 2c. 检查命令的危险参数（如 python -c, git -c 等）
+        dangerous_args = self.DANGEROUS_ARGUMENTS.get(base, [])
+        for pattern in dangerous_args:
+            if re.search(pattern, command, re.IGNORECASE):
+                return False, (
+                    f"命令 '{base}' 使用了危险参数（匹配: {pattern}）。"
+                    f"禁止通过 {base} 执行任意代码。"
+                )
 
         # 3. 检查管道和命令链
         try:

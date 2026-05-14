@@ -41,7 +41,9 @@ def config_show():
     """显示当前配置"""
     cfg = load_config()
     console.print("[bold]LLM 配置[/bold]")
+    console.print(f"  名称: {cfg.llm.name}")
     console.print(f"  模型: {cfg.llm.model}")
+    console.print(f"  端点: {cfg.llm.base_url}")
     api_status = "已设置" if cfg.llm.api_key.get_secret_value() else "[red]未设置[/red]"
     console.print(f"  API Key: {api_status}")
     console.print(f"  Max Tokens: {cfg.llm.max_tokens_per_request}")
@@ -54,6 +56,34 @@ def config_show():
     console.print(f"  5小时预算: ${cfg.budget.budget_per_5h}")
     console.print("[bold]日志[/bold]")
     console.print(f"  级别: {cfg.log_level}")
+
+
+@main.group()
+def llm():
+    """LLM 提供商管理"""
+    pass
+
+
+@llm.command("list")
+def llm_list():
+    """列出支持的 LLM 提供商"""
+    from devflow.llm import list_supported_providers
+
+    providers = list_supported_providers()
+    console.print("[bold]支持的 LLM 提供商:[/bold]")
+    for p in providers:
+        console.print(f"  • {p}")
+
+
+@llm.command("info")
+def llm_info():
+    """显示当前 LLM 配置"""
+    cfg = load_config()
+    console.print(f"[bold]当前 LLM:[/bold] {cfg.llm.name}")
+    console.print(f"  模型: {cfg.llm.model}")
+    console.print(f"  端点: {cfg.llm.base_url}")
+    api_status = "已设置" if cfg.llm.api_key.get_secret_value() else "[red]未设置[/red]"
+    console.print(f"  API Key: {api_status}")
 
 
 @main.command()
@@ -89,16 +119,16 @@ def _run_task(task: str, cfg):
     from pathlib import Path
 
     from devflow.core.agent import Agent
-    from devflow.llm import DeepSeekClient
+    from devflow.llm import create_llm_provider
     from devflow.tools.base import create_tool_registry, set_safe_root
 
     repo_path = Path(".").resolve()
     set_safe_root(repo_path)
 
     # 初始化组件
-    client = DeepSeekClient(cfg.llm)
+    llm_provider = create_llm_provider(cfg.llm)
     tools = create_tool_registry()
-    agent = Agent(client, tools, config=cfg)
+    agent = Agent(llm_provider, tools, config=cfg)
 
     # 执行
     async def _run():

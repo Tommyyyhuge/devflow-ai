@@ -6,12 +6,17 @@ Week 2 升级：告别手动注册，自动发现所有工具。
 import importlib
 import pkgutil
 
+import structlog
+
 from devflow.tools.base import Tool, ToolRegistry
+
+logger = structlog.get_logger()
 
 
 def discover_tools() -> ToolRegistry:
     """自动发现并注册所有 Tool 子类"""
     registry = ToolRegistry()
+    failed_tools: list[dict] = []
 
     # 扫描当前包的所有模块
     package = importlib.import_module("devflow.tools")
@@ -35,8 +40,17 @@ def discover_tools() -> ToolRegistry:
                 try:
                     tool = attr()
                     registry.register(tool)
-                except Exception:
-                    pass  # 忽略实例化失败的工具
+                except Exception as e:
+                    failed_tools.append({"tool": attr_name, "module": module_name, "error": str(e)})
+                    logger.warning(
+                        "工具注册失败",
+                        tool=attr_name,
+                        module=module_name,
+                        error=str(e),
+                    )
+
+    if failed_tools:
+        logger.warning("部分工具加载失败", count=len(failed_tools), failed=failed_tools)
 
     return registry
 

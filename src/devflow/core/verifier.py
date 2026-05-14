@@ -72,11 +72,13 @@ class Verifier:
                 message=e.msg,
                 source="syntax",
             ))
-        except Exception as e:
+        except OSError as e:
             verdict.warnings.append(Diagnostic(
                 file=str(file_path), severity="warning",
                 message=f"无法检查: {e}", source="behavior",
             ))
+        except Exception:
+            raise  # 严重异常（MemoryError 等）向上传播，不静默吞掉
 
         return verdict
 
