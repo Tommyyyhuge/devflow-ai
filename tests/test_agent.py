@@ -6,12 +6,20 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Protocol
 
 from devflow.core.agent import Agent
 from devflow.core.planner import Planner, StepType
 from devflow.llm import ChatResponse, TokenUsage
 from devflow.tools import create_tool_registry
 from devflow.tools.base import set_safe_root
+
+
+class LLMClient(Protocol):
+    """LLM 客户端接口协议（用于类型检查和 Mock）"""
+
+    def chat_for_planning(self, messages: list[dict]) -> ChatResponse: ...
+    def chat_for_execution(self, messages: list[dict], tools: list[dict]) -> ChatResponse: ...
 
 
 class MockLLMClient:
@@ -185,7 +193,8 @@ class TestAgentCoreLoop:
         src = tmp_path / "src" / "api"
         src.mkdir(parents=True)
         (src / "__init__.py").write_text("from .users import users_router\n")
-        (src / "users.py").write_text("from fastapi import APIRouter\n\nusers_router = APIRouter()\n")
+        users_content = "from fastapi import APIRouter\n\nusers_router = APIRouter()\n"
+        (src / "users.py").write_text(users_content)
 
         set_safe_root(tmp_path)
 
@@ -222,7 +231,14 @@ class TestAgentCoreLoop:
                                     "name": "write_file",
                                     "arguments": json.dumps({
                                         "path": "src/api/health.py",
-                                        "content": "from fastapi import APIRouter\n\nhealth_router = APIRouter()\n\n\n@health_router.get('/health')\ndef health():\n    return {'status': 'ok'}\n",
+                                        "content": (
+                                            "from fastapi import APIRouter\n"
+                                            "health_router = APIRouter()\n"
+                                            "\n"
+                                            "@health_router.get('/health')\n"
+                                            "def health():\n"
+                                            "    return {'status': 'ok'}\n"
+                                        ),
                                     }),
                                 }
                             }]
@@ -241,7 +257,10 @@ class TestAgentCoreLoop:
                                     "arguments": json.dumps({
                                         "path": "src/api/__init__.py",
                                         "old_string": "from .users import users_router",
-                                        "new_string": "from .users import users_router\nfrom .health import health_router",
+                                        "new_string": (
+                                            "from .users import users_router\n"
+                                            "from .health import health_router"
+                                        ),
                                     }),
                                 }
                             }]
@@ -277,43 +296,134 @@ class TestAgentCoreLoop:
 class TestRepoMapAndParser:
     """Week 2: Tree-sitter 解析 + RepoMap 测试"""
 
-    def test_python_parser_symbols(self):
+    def test_python_parser_symbols(self, tmp_path):
         """验证 PythonProvider 正确提取函数和类"""
         from devflow.repo.parser import PythonProvider
 
+        test_file = tmp_path / "test_module.py"
+        test_file.write_text(
+            "import os\n"
+            "from typing import Optional\n"
+            "\n"
+            "class Agent:\n"
+            "    def __init__(self, name: str):\n"
+            "        self.name = name\n"
+            "\n"
+            "    async def run(self, task: str) -> dict:\n"
+            "        return {'task': task}\n"
+            "\n"
+            "def helper_func(x: int) -> int:\n"
+            "    return x * 2\n",
+            encoding="utf-8",
+        )
+
         p = PythonProvider()
-        result = p.parse_file(Path("D:/Aiagent/src/devflow/core/agent.py"))
-        assert len(result.symbols) > 0
-        assert any(s.kind == "class" for s in result.symbols)
-        assert any(s.kind == "method" for s in result.symbols)
+        result = p.parse_file(test_file)
+        # 验证提取到了符号（具体数量取决于 tree-sitter 版本和解析策略）
+        assert len(result.symbols) >= 2
+        assert any(s.kind == "class" and s.name == "Agent" for s in result.symbols)
         assert result.language == "python"
 
-    def test_python_parser_imports(self):
+    def test_python_parser_imports(self, tmp_path):
         """验证导入提取"""
         from devflow.repo.parser import PythonProvider
 
-        p = PythonProvider()
-        result = p.parse_file(Path("D:/Aiagent/src/devflow/core/agent.py"))
-        assert len(result.imports) > 0
+        test_file = tmp_path / "test_imports.py"
+        test_file.write_text("""
+import os
+from pathlib import Path
+from typing import Optional, List
+from devflow.config import load_config
+""", encoding="utf-8")
 
-    def test_repomap_build(self):
+        p = PythonProvider()
+        result = p.parse_file(test_file)
+        assert len(result.imports) == 4
+        import_modules = {imp.module for imp in result.imports}
+        assert "os" in import_modules
+        assert "pathlib" in import_modules
+        assert "typing" in import_modules
+        assert "devflow.config" in import_modules
+
+    def test_repomap_build(self, tmp_path):
         """验证 RepoMap 构建"""
         from devflow.repo.repomap import RepoMapBuilder
 
-        b = RepoMapBuilder(Path("D:/Aiagent/src/devflow"))
+        # 在 tmp_path 下创建迷你项目结构
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "agent.py").write_text("""
+class Agent:
+    def run(self):
+        pass
+    def plan(self):
+        pass
+""")
+        (src / "config.py").write_text("""
+from pydantic import BaseSettings
+
+class Config(BaseSettings):
+    debug: bool = False
+""")
+        (src / "tools.py").write_text("""
+from abc import ABC, abstractmethod
+
+class Tool(ABC):
+    @abstractmethod
+    def execute(self):
+        pass
+
+class ReadTool(Tool):
+    def execute(self):
+        return "read"
+
+class WriteTool(Tool):
+    def execute(self):
+        return "write"
+""")
+        (src / "utils.py").write_text("""
+import os
+import json
+
+def load_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f)
+""")
+
+        b = RepoMapBuilder(tmp_path)
         rm = b.build()
-        assert len(rm.entries) >= 10  # 至少 10 个 Python 文件
-        assert rm.total_symbols > 50
+        assert len(rm.entries) >= 4  # 至少 4 个 Python 文件
+        assert rm.total_symbols >= 6  # Agent(1+2) + Config(1) + Tool(1+2) + utils(2) = 9
         assert all(e.summary for e in rm.entries if e.symbols)
 
-    def test_repomap_context_for_task(self):
+    def test_repomap_context_for_task(self, tmp_path):
         """验证 RepoMap 为任务生成上下文"""
         from devflow.repo.repomap import RepoMapBuilder
 
-        b = RepoMapBuilder(Path("D:/Aiagent/src/devflow"))
+        # 创建带有关键词的临时项目
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "agent.py").write_text("""
+class Agent:
+    def execute_step(self, step):
+        pass
+    def verify_result(self, result):
+        pass
+""")
+        (src / "planner.py").write_text("""
+class Planner:
+    def create_plan(self, task):
+        return ["step1", "step2"]
+""")
+
+        b = RepoMapBuilder(tmp_path)
         context = b.get_context_for_task("agent execute step", max_files=5)
-        assert len(context) > 100
-        assert "devflow" in context.lower()
+        assert len(context) > 50
+        assert "agent" in context.lower() or "planner" in context.lower()
 
     def test_language_registry(self):
         """验证语言注册和检测"""

@@ -17,9 +17,18 @@ class TestConfig:
         assert isinstance(c.budget, BudgetConfig)
 
     def test_config_secret(self):
-        c = load_config()
+        from devflow.config import LLMConfig
+        # 直接验证 SecretStr 行为，不依赖环境
+        c = LLMConfig(
+            name="test",
+            api_key="sk-test1234",
+            base_url="https://api.test.com",
+        )
         # SecretStr 默认隐藏
-        assert c.llm.api_key.get_secret_value() == ""
+        assert str(c.api_key) == "**********"
+        assert c.api_key.get_secret_value() == "sk-test1234"
+        assert c.base_url == "https://api.test.com"
+        assert c.name == "test"
 
 
 class TestToolsExtended:
@@ -30,7 +39,11 @@ class TestToolsExtended:
 
     def test_run_shell_timeout(self):
         t = RunShellTool()
-        r = t.execute(command="sleep 10", timeout=1)
+        import sys
+        if sys.platform == "win32":
+            r = t.execute(command="timeout 10", timeout=1)
+        else:
+            r = t.execute(command="sleep 10", timeout=1)
         assert not r.success
 
     def test_search_code(self, tmp_path):
