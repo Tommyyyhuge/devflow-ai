@@ -1,6 +1,6 @@
 """代码解析器 — Tree-sitter AST 分析
 
-Week 2 Day 1-2：基于 Tree-sitter 提取代码结构（函数/类/导入）。
+基于 Tree-sitter 提取代码结构（函数/类/导入）。
 LanguageProvider 抽象允许插件化扩展多语言支持。
 """
 
@@ -270,18 +270,196 @@ class LanguageRegistry:
 
     @classmethod
     def detect(cls, path: Path) -> LanguageProvider | None:
-        """根据文件扩展名检测语言"""
+        """根据文件扩展名检测语言
+
+        优先返回专用 Provider（如 PythonProvider），
+        无专用 Provider 时返回 GenericTextProvider。
+        二进制文件返回 None。
+        """
         ext_map = {
             ".py": "python",
             ".ts": "typescript",
             ".tsx": "typescript",
             ".js": "javascript",
+            ".jsx": "javascript",
             ".go": "go",
             ".rs": "rust",
         }
         lang = ext_map.get(path.suffix)
-        return cls.get(lang) if lang else None
+
+        # 专用 Provider（Tree-sitter 解析）
+        if lang:
+            provider = cls.get(lang)
+            if provider:
+                return provider
+
+        # 通用文本文件 Provider（正则解析）
+        text_extensions = {
+            ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs",
+            ".md", ".json", ".yaml", ".yml", ".toml", ".xml",
+            ".html", ".css", ".sh", ".bat", ".ps1", ".sql",
+            ".graphql", ".proto", ".env", ".cfg", ".ini",
+        }
+        if path.suffix in text_extensions or not path.suffix:
+            return _get_generic_provider(path.suffix)
+
+        return None
 
 
-# 默认注册 Python
+class GenericTextProvider(LanguageProvider):
+    """通用文本文件解析器 — 不依赖 Tree-sitter，使用正则提取基本结构
+
+    适用于任何文本文件（Markdown、JSON、YAML、配置、脚本等）。
+    提取规则基于常见编程语言的函数/类定义模式。
+    """
+
+    language = "text"
+
+    # 语言特定的模式
+    PATTERNS: dict[str, dict[str, list[str]]] = {
+        "javascript": {
+            "function": [
+                r'(?:async\s+)?function\s+(\w+)',
+                r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>',
+                r'(?:const|let|var)\s+(\w+)\s*=\s*function',
+            ],
+            "class": [r'class\s+(\w+)'],
+        },
+        "typescript": {
+            "function": [
+                r'(?:async\s+)?function\s+(\w+)',
+                r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>',
+                r'(?:const|let|var)\s+(\w+)\s*=\s*function',
+                r'(?:private|protected|public)?\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*:\s*\w+',
+            ],
+            "class": [r'(?:export\s+)?class\s+(\w+)',
+                       r'(?:export\s+)?interface\s+(\w+)'],
+        },
+        "go": {
+            "function": [r'func\s+(?:\([^)]*\)\s+)?(\w+)\s*\('],
+            "class": [r'type\s+(\w+)\s+(?:struct|interface)'],
+        },
+        "rust": {
+            "function": [r'(?:pub\s+)?fn\s+(\w+)\s*\('],
+            "class": [r'(?:pub\s+)?(?:struct|trait|enum)\s+(\w+)'],
+        },
+    }
+
+    def __init__(self, language_hint: str = "text"):
+        self._language_hint = language_hint
+
+    @property
+    def language(self) -> str:
+        return self._language_hint
+
+    def parse_file(self, path: Path) -> ParseResult:
+        import re
+
+        result = ParseResult(path=path, language=self._language_hint)
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception as e:
+            result.error = str(e)
+            return result
+
+        result.token_count = len(content.split())
+
+        # 根据语言选择模式
+        lang_patterns = self.PATTERNS.get(self._language_hint, {})
+
+        # 提取符号
+        line_no = 0
+        for line in content.splitlines():
+            line_no += 1
+            stripped = line.strip()
+
+            # 函数匹配
+            for pattern in lang_patterns.get("function", []):
+                match = re.search(pattern, stripped)
+                if match:
+                    name = match.group(1)
+                    result.symbols.append(Symbol(
+                        name=name,
+                        kind="function",
+                        signature=stripped[:80],
+                        line=line_no,
+                    ))
+                    break  # 每行只匹配一个
+
+            # 类匹配
+            for pattern in lang_patterns.get("class", []):
+                match = re.search(pattern, stripped)
+                if match:
+                    name = match.group(1)
+                    result.symbols.append(Symbol(
+                        name=name,
+                        kind="class",
+                        signature=stripped[:80],
+                        line=line_no,
+                    ))
+                    break
+
+        # 通用导入检测（简单启发式）
+        result.imports = self._extract_imports_from_content(content)
+
+        return result
+
+    def extract_imports(self, path: Path) -> list[Import]:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            return []
+        return self._extract_imports_from_content(content)
+
+    def _extract_imports_from_content(self, content: str) -> list[Import]:
+        imports: list[Import] = []
+        line_no = 0
+        for line in content.splitlines():
+            line_no += 1
+            stripped = line.strip()
+
+            # JavaScript/TypeScript: import { x } from 'y'
+            if stripped.startswith("import") and "from" in stripped:
+                parts = stripped.split("from")
+                if len(parts) >= 2:
+                    module = parts[-1].strip().strip(";'\"")
+                    imports.append(Import(module=module, line=line_no))
+
+            # Go: import "x"
+            elif stripped.startswith('import "'):
+                module = stripped.split('"')[1] if '"' in stripped else ""
+                imports.append(Import(module=module, line=line_no))
+
+            # Rust: use x::y;
+            elif stripped.startswith("use "):
+                module = stripped[4:].strip().strip(";")
+                imports.append(Import(module=module, line=line_no))
+
+        return imports
+
+
+def _get_generic_provider(ext: str) -> GenericTextProvider:
+    """根据扩展名返回对应的通用 Provider"""
+    ext_lang = {
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".go": "go",
+        ".rs": "rust",
+        ".md": "markdown",
+        ".json": "json",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".toml": "toml",
+        ".sh": "shell",
+        ".html": "html",
+        ".css": "css",
+    }
+    return GenericTextProvider(ext_lang.get(ext, "text"))
+
+
+# 注册所有语言 Provider
 LanguageRegistry.register(PythonProvider())
+# 通用 Provider 按需创建（不注册到 _providers，由 detect 直接返回）

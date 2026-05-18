@@ -1,7 +1,6 @@
-"""单步 ReAct 执行器
+"""单步 ReAct 执行器 — Think → Act → Observe 循环
 
-Week 1 简化版：基础 ReAct 循环（Think → Act → Observe）。
-Week 2 升级：日志记录、Token 跟踪、更好的错误处理。
+支持工具调用、Token 使用跟踪、分层重试策略。
 """
 
 from dataclasses import dataclass, field
@@ -200,7 +199,7 @@ class Executor:
 
     @staticmethod
     def _rounds_for_type(step_type: StepType) -> int:
-        """自适应轮次上限（Week 3 升级）"""
+        """自适应轮次上限：根据步骤类型分配不同轮次"""
         return {
             StepType.READ: 3,      # 读文件/搜索（简单）
             StepType.WRITE: 10,    # 创建/编辑（中等）
@@ -208,7 +207,7 @@ class Executor:
         }.get(step_type, 8)
 
     async def execute_with_retry(self, step: Step, context: str = "") -> StepResult:
-        """策略分层重试（Week 3 新增）：
+        """策略分层重试：
         第1次：相同方法重试（处理临时错误）
         第2次：换思路（修改提示词）
         第3次：降级方案（跳过/标记失败）

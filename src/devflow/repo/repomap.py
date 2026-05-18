@@ -1,11 +1,12 @@
 """RepoMap — 项目地图构建
 
-Week 2 Day 3-4：结构化项目索引，包含符号摘要和依赖关系。
-Week 2 升级：基于文件修改时间的增量更新缓存。
+结构化项目索引，包含符号摘要和依赖关系。
+支持基于文件修改时间的增量更新缓存。
 用于为 LLM 构建精简的项目上下文。
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -194,34 +195,82 @@ class RepoMapBuilder:
         return deps
 
     def get_context_for_task(self, task: str, max_files: int = 10) -> str:
-        """根据任务构建 LLM 上下文（精简版）"""
-        repomap = self.build()
-        from devflow.repo.scanner import ContextBuilder
+        """根据任务构建 LLM 上下文（基于 RepoMap 符号和关键词匹配）"""
+        import re
 
-        # 先用关键词筛选相关文件
-        cb = ContextBuilder(self.root)
-        ctx = cb.build(task)
-        relevant_paths = {f.relative for f in ctx.relevant_files}
+        repomap = self.build()
+
+        # 提取任务关键词
+        keywords = self._extract_keywords(task)
+        keywords_lower = [k.lower() for k in keywords]
+
+        # 基于关键词给 entry 打分
+        scored_entries: list[tuple[float, FileEntry]] = []
+        for entry in repomap.entries:
+            score = 0.0
+            path_lower = entry.path.lower()
+            summary_lower = entry.summary.lower()
+
+            for kw in keywords_lower:
+                if kw in path_lower:
+                    score += 3.0  # 路径匹配权重高
+                if kw in summary_lower:
+                    score += 2.0  # 符号摘要匹配
+                if any(kw in imp.lower() for imp in entry.imports):
+                    score += 1.0  # 导入匹配
+
+            if score > 0:
+                scored_entries.append((score, entry))
+
+        # 按分数排序
+        scored_entries.sort(key=lambda x: x[0], reverse=True)
 
         # 构建上下文文本
         parts = [f"项目: {self.root.name}", f"文件数: {len(repomap.entries)}"]
 
+        if repomap.total_symbols > 0:
+            parts.append(f"符号数: {repomap.total_symbols}")
+
         # 相关文件的符号摘要
         shown = 0
-        for entry in repomap.entries:
-            if entry.path in relevant_paths or shown < 5:
-                parts.append(f"\n📄 {entry.path} ({entry.language})")
+        for score, entry in scored_entries:
+            parts.append(f"\n{entry.path} ({entry.language}, score={score:.1f})")
+            if entry.summary:
+                parts.append(entry.summary)
+            shown += 1
+            if shown >= max_files:
+                remaining = len(scored_entries) - shown
+                if remaining > 0:
+                    parts.append(f"\n... 还有 {remaining} 个相关文件")
+                break
+
+        # 如果没有关键词匹配，展示前几个文件
+        if shown == 0 and repomap.entries:
+            parts.append("\n主要文件:")
+            for entry in repomap.entries[:max_files]:
+                parts.append(f"\n{entry.path} ({entry.language})")
                 if entry.summary:
                     parts.append(entry.summary)
-                shown += 1
-                if shown >= max_files:
-                    parts.append(f"\n... 还有 {len(repomap.entries) - shown} 个文件")
-                    break
 
         # 依赖关系（如果有）
         if repomap.dependencies:
             parts.append("\n文件依赖:")
             for file, deps in list(repomap.dependencies.items())[:5]:
-                parts.append(f"  {file} → {', '.join(deps[:3])}")
+                parts.append(f"  {file} -> {', '.join(deps[:3])}")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _extract_keywords(task: str) -> list[str]:
+        """从任务描述中提取关键词"""
+        words = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', task)
+        stopwords = {
+            "src", "api", "the", "and", "for", "that", "this", "with", "from",
+            "create", "add", " implement", "fix", "update", "delete", "remove",
+        }
+        keywords = []
+        for w in words:
+            w_lower = w.lower()
+            if len(w) >= 3 and w_lower not in stopwords:
+                keywords.append(w)
+        return keywords[:20]

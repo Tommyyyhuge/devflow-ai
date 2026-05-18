@@ -1,7 +1,6 @@
 """Verifier — 结构化验证器
 
-Week 3 升级：Verifier 从简单布尔值升级为结构化 Verdict + Diagnostic。
-支撑 LSP 集成和 IDE 诊断。
+返回结构化 Verdict + Diagnostic（LSP 兼容格式），支持语法检查和行为验证。
 """
 
 import ast
@@ -11,7 +10,7 @@ from pathlib import Path
 
 @dataclass
 class Diagnostic:
-    """LSP 兼容的诊断信息（Week 3 新增）"""
+    """LSP 兼容的诊断信息"""
     file: str
     line: int = 0
     column: int = 0
@@ -22,7 +21,7 @@ class Diagnostic:
 
 @dataclass
 class Verdict:
-    """结构化验证结果（Week 3 升级）"""
+    """结构化验证结果"""
     passed: bool
     errors: list[Diagnostic] = field(default_factory=list)
     warnings: list[Diagnostic] = field(default_factory=list)
@@ -94,7 +93,7 @@ class Verifier:
         return verdict
 
     def verify_step(self, step, result) -> Verdict:
-        """步骤执行后验证（Week 3 新增：整合执行结果判断）"""
+        """步骤执行后验证：整合执行结果判断"""
         from devflow.core.planner import StepType
 
         verdict = Verdict(passed=True)

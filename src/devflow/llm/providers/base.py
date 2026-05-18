@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-from devflow.core.events import EventBus, EventType
 from devflow.llm.cost_tracker import CostTracker
 
 
@@ -33,7 +32,15 @@ class LLMProvider(ABC):
     def __init__(self) -> None:
         """初始化成本追踪器和事件总线。"""
         self.cost_tracker = CostTracker()
-        self.event_bus = EventBus()
+        self._event_bus = None
+
+    @property
+    def event_bus(self):
+        """延迟初始化事件总线，避免循环导入"""
+        if self._event_bus is None:
+            from devflow.core.events import EventBus
+            self._event_bus = EventBus()
+        return self._event_bus
 
     def chat_with_cost(
         self,
@@ -43,6 +50,8 @@ class LLMProvider(ABC):
         temperature: float = 0.0,
     ) -> ChatResponse:
         """带成本追踪的聊天接口。"""
+        from devflow.core.events import EventType
+
         # 触发开始事件
         self.event_bus.emit(EventType.LLM_CALL_START, {
             "model": self.config.model,

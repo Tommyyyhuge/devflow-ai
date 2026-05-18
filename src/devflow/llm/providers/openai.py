@@ -135,6 +135,39 @@ class OpenAIProvider(LLMProvider):
 
         return result
 
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        thinking: bool = False,
+        temperature: float = 0.0,
+    ):
+        """流式聊天接口，yield 每个 text chunk。
+
+        用于 Web UI 实时显示 LLM 输出。
+        """
+        kwargs = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": self.config.max_tokens_per_request,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield delta.content
+        except Exception as e:
+            logger.error("流式调用失败", error=self._sanitize_error(str(e)))
+            yield f"[错误: {self._sanitize_error(str(e))}]"
+
     def chat_for_planning(self, messages: list[dict]) -> ChatResponse:
         """规划模式：thinking + 稍高温度。"""
         return self.chat(

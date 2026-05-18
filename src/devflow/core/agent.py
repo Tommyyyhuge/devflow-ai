@@ -1,7 +1,6 @@
 """Agent 主循环 — Plan → Execute → Verify
 
-Week 1 简化版：基础 ReAct + Plan-Execute。
-Week 2 升级：Token 预算、日志记录、更好的错误处理。
+支持 Token 预算检查、对话历史持久化、结构化验证。
 """
 
 from dataclasses import dataclass, field
@@ -13,6 +12,7 @@ from devflow.core.executor import Executor, StepResult
 from devflow.core.planner import Plan, Planner, Step
 from devflow.core.verifier import Verdict, Verifier
 from devflow.history.store import ConversationStore
+from devflow.llm.cost_tracker import BudgetExceededError, CostTracker
 from devflow.llm.factory import create_llm_provider, create_smart_router
 
 logger = structlog.get_logger()
@@ -29,14 +29,16 @@ class TaskResult:
     error: str = ""
     files_modified: list[str] = field(default_factory=list)
     total_tokens: int = 0
+    total_cost_usd: float = 0.0
 
 
 class Agent:
     """DevFlow Agent 主类"""
 
-    def __init__(self, llm_client=None, tools=None, config=None):
+    def __init__(self, llm_client=None, tools=None, config=None, event_queue=None):
         self.tools = tools
         self.config = config
+        self.event_queue = event_queue  # SSE 事件队列（可选）
 
         # 智能路由：根据配置自动选择 Provider 创建方式
         if config is not None and config.router.enabled:
@@ -47,6 +49,19 @@ class Agent:
         self.planner = Planner(self.llm)
         self.executor = Executor(self.llm, tools)
         self.verifier = Verifier()
+
+        # 成本追踪器（如配置存在，启用预算检查）
+        self.cost_tracker: CostTracker | None = None
+        if config is not None:
+            self.cost_tracker = CostTracker(
+                weekly_limit=config.budget.weekly_budget,
+                per_5h_limit=config.budget.budget_per_5h,
+            )
+
+    async def _emit(self, event_type: str, data: dict) -> None:
+        """发射 SSE 事件到队列"""
+        if self.event_queue is not None:
+            await self.event_queue.put({"type": event_type, "data": data})
 
     def _check_token_budget(self, current: int) -> bool:
         """检查是否超出 Token 预算"""
@@ -74,6 +89,23 @@ class Agent:
         """
         repo_path = Path(repo_path).resolve()
         logger.info("开始执行任务", task=task[:100], repo_path=str(repo_path))
+
+        # --- 成本预算检查 ---
+        if self.cost_tracker is not None:
+            try:
+                budget_status = self.cost_tracker.check_budget()
+                logger.info(
+                    "预算检查通过",
+                    weekly=f"${budget_status.weekly_spent}/${budget_status.weekly_limit}",
+                    per_5h=f"${budget_status.per_5h_spent}/${budget_status.per_5h_limit}",
+                )
+            except BudgetExceededError as e:
+                logger.error("预算已耗尽", error=str(e))
+                return TaskResult(
+                    success=False,
+                    task=task,
+                    error=f"预算上限已触发: {e}",
+                )
 
         # 初始化对话历史存储
         store = ConversationStore()
@@ -105,16 +137,25 @@ class Agent:
         except Exception as e:
             logger.warning("创建分支失败", error=str(e))
 
-        # 1. 收集项目上下文（Week 2 升级：使用 RepoMap）
+        # 1. 收集项目上下文（RepoMap 主路径，scanner 兜底）
         from devflow.repo.repomap import RepoMapBuilder
         builder = RepoMapBuilder(repo_path)
-        context = builder.get_context_for_task(task)
-        # Fallback: 如果 RepoMap 无结果，用简化版
-        if not context or len(builder.build().entries) == 0:
+        repomap = builder.build()
+
+        if repomap.entries:
+            # RepoMap 主路径：基于符号和关键词匹配
+            context = builder.get_context_for_task(task)
+            logger.info("使用 RepoMap 构建上下文",
+                       files=len(repomap.entries),
+                       symbols=repomap.total_symbols)
+        else:
+            # Fallback: 无代码文件可解析，用简化版 scanner
             from devflow.repo.scanner import ContextBuilder
             cb = ContextBuilder(repo_path)
             ctx = cb.build(task)
             context = self._format_context(ctx)
+            logger.info("RepoMap 无可用条目，fallback 到 scanner",
+                       files=ctx.total_files)
 
         # 更新状态为执行中
         store.update_status(conv_id, "running")
@@ -129,84 +170,30 @@ class Agent:
         store.add_message(conv_id, "assistant", f"执行计划：\n{plan_text}",
                          metadata={"type": "plan", "step_count": len(plan.steps)})
 
-        # 3. 逐步执行
+        # 发射 plan 事件
+        await self._emit("plan", {
+            "steps": [{"index": s.index, "type": s.type.value, "description": s.description} for s in plan.steps]
+        })
+
+        # 3. 执行步骤（支持并行调度）
         step_results: list[StepResult] = []
         all_files_modified: list[str] = []
         total_tokens = 0
+        shared_context = context  # 共享可追加上下文
 
-        for step in plan.steps:
-            # Token 预算检查
-            if not self._check_token_budget(total_tokens):
-                error_msg = f"Token 预算已耗尽（已使用 {total_tokens} tokens）"
-                store.update_status(conv_id, "failed", error=error_msg,
-                                  total_tokens=total_tokens)
-                store.add_message(conv_id, "system", error_msg,
-                                metadata={"type": "budget_exceeded"})
-                return TaskResult(
-                    success=False,
-                    task=task,
-                    plan=plan,
-                    step_results=step_results,
-                    error=error_msg,
-                    files_modified=all_files_modified,
-                    total_tokens=total_tokens,
-                )
+        # 检查是否有依赖关系：无依赖时保持串行（向后兼容）
+        has_dependencies = any(s.depends_on for s in plan.steps)
 
-            logger.info("执行步骤",
-                       step_index=step.index,
-                       type=step.type.value,
-                       description=step.description[:50])
-
-            # Week 3: 使用分层重试替代基础执行
-            result = await self.executor.execute_with_retry(step, context)
-            step_results.append(result)
-            total_tokens += result.tokens_used
-
-            # 添加步骤执行消息
-            msg = (
-                f"步骤 {step.index}: {result.output[:200]}"
-                if result.success
-                else f"失败: {result.error}"
+        if has_dependencies:
+            # 批处理并行调度
+            step_results, all_files_modified, total_tokens = await self._execute_parallel(
+                plan, shared_context, store, conv_id
             )
-            store.add_message(
-                conv_id, "tool",
-                msg,
-                metadata={
-                    "type": "step_result",
-                    "step_index": step.index,
-                    "success": result.success,
-                    "tokens": result.tokens_used,
-                }
+        else:
+            # 串行执行（向后兼容）
+            step_results, all_files_modified, total_tokens = await self._execute_sequential(
+                plan, shared_context, store, conv_id
             )
-
-            if result.files_modified:
-                all_files_modified.extend(result.files_modified)
-                logger.info("步骤修改了文件",
-                           step_index=step.index,
-                           files=result.files_modified)
-
-            if not result.success and not self._should_continue(step, result):
-                logger.error("步骤失败，终止任务",
-                           step_index=step.index,
-                           error=result.error)
-                store.update_status(conv_id, "failed", success=False,
-                                  error=result.error, total_tokens=total_tokens,
-                                  files_modified=all_files_modified)
-                store.add_message(conv_id, "system", f"任务失败: {result.error}")
-                return TaskResult(
-                    success=False,
-                    task=task,
-                    plan=plan,
-                    step_results=step_results,
-                    error=f"步骤 {step.index} 失败: {result.error}",
-                    files_modified=all_files_modified,
-                    total_tokens=total_tokens,
-                )
-
-            logger.info("步骤完成",
-                       step_index=step.index,
-                       success=result.success,
-                       tokens=result.tokens_used)
 
         # 4. 验证
         logger.info("开始验证")
@@ -243,10 +230,25 @@ class Agent:
             except Exception as e:
                 logger.warning("自动提交失败", error=str(e))
 
+        # 计算本次任务总成本
+        total_cost = 0.0
+        if self.cost_tracker is not None:
+            session = self.cost_tracker.get_session_summary()
+            total_cost = float(session.get("total_cost_usd", 0))
+
+        await self._emit("complete", {
+            "success": success,
+            "total_steps": len(step_results),
+            "total_tokens": total_tokens,
+            "total_cost": total_cost,
+            "files_modified": all_files_modified,
+        })
+
         logger.info("任务完成",
                    success=success,
                    total_steps=len(step_results),
                    total_tokens=total_tokens,
+                   total_cost=f"${total_cost:.5f}",
                    files_modified=len(all_files_modified))
 
         return TaskResult(
@@ -257,7 +259,138 @@ class Agent:
             verify_result=vr,
             files_modified=all_files_modified,
             total_tokens=total_tokens,
+            total_cost_usd=total_cost,
         )
+
+    async def _execute_sequential(
+        self, plan: Plan, context: str, store: ConversationStore, conv_id: str
+    ) -> tuple[list[StepResult], list[str], int]:
+        """串行执行步骤（向后兼容）"""
+        step_results: list[StepResult] = []
+        all_files_modified: list[str] = []
+        total_tokens = 0
+        shared_context = context
+
+        for step in plan.steps:
+            if not self._check_token_budget(total_tokens):
+                error_msg = f"Token 预算已耗尽（已使用 {total_tokens} tokens）"
+                store.update_status(conv_id, "failed", error=error_msg, total_tokens=total_tokens)
+                return step_results, all_files_modified, total_tokens
+
+            result = await self._execute_single_step(step, shared_context, store, conv_id)
+            step_results.append(result)
+            total_tokens += result.tokens_used
+
+            if result.output:
+                shared_context += f"\n\n步骤 {result.step.index} ({result.step.type.value}):\n{result.output[:500]}"
+
+            if result.files_modified:
+                all_files_modified.extend(result.files_modified)
+
+            if not result.success and not self._should_continue(step, result):
+                return step_results, all_files_modified, total_tokens
+
+        return step_results, all_files_modified, total_tokens
+
+    async def _execute_parallel(
+        self, plan: Plan, context: str, store: ConversationStore, conv_id: str
+    ) -> tuple[list[StepResult], list[str], int]:
+        """批处理并行执行步骤"""
+        import asyncio
+
+        step_results: list[StepResult] = []
+        all_files_modified: list[str] = []
+        total_tokens = 0
+        shared_context = context
+        completed_indices: set[int] = set()
+        remaining = list(plan.steps)
+
+        while remaining:
+            # 找出所有就绪步骤（依赖已全部完成）
+            ready = [s for s in remaining if all(d in completed_indices for d in s.depends_on)]
+            if not ready:
+                raise ValueError("依赖关系有误，存在无法到达的步骤")
+
+            logger.info("并行执行批次", step_indices=[s.index for s in ready])
+            await self._emit("batch_start", {"steps": [s.index for s in ready]})
+
+            # 并行执行就绪步骤
+            batch_results = await asyncio.gather(*[
+                self._execute_single_step(s, shared_context, store, conv_id)
+                for s in ready
+            ])
+
+            # 收集结果
+            for result in batch_results:
+                completed_indices.add(result.step.index)
+                step_results.append(result)
+                total_tokens += result.tokens_used
+                remaining = [s for s in remaining if s.index != result.step.index]
+
+                if result.output:
+                    shared_context += f"\n\n步骤 {result.step.index} ({result.step.type.value}):\n{result.output[:500]}"
+
+                if result.files_modified:
+                    all_files_modified.extend(result.files_modified)
+
+            # 检查是否有失败且不应继续的步骤
+            for result in batch_results:
+                if not result.success and not self._should_continue(result.step, result):
+                    return step_results, all_files_modified, total_tokens
+
+        return step_results, all_files_modified, total_tokens
+
+    async def _execute_single_step(
+        self, step: Step, context: str, store: ConversationStore, conv_id: str
+    ) -> StepResult:
+        """执行单个步骤"""
+        logger.info("执行步骤",
+                   step_index=step.index,
+                   type=step.type.value,
+                   description=step.description[:50])
+
+        await self._emit("step_start", {
+            "index": step.index,
+            "type": step.type.value,
+            "description": step.description,
+        })
+
+        result = await self.executor.execute_with_retry(step, context)
+
+        # 添加步骤执行消息
+        msg = (
+            f"步骤 {step.index}: {result.output[:200]}"
+            if result.success
+            else f"失败: {result.error}"
+        )
+        store.add_message(
+            conv_id, "tool", msg,
+            metadata={
+                "type": "step_result",
+                "step_index": step.index,
+                "success": result.success,
+                "tokens": result.tokens_used,
+            }
+        )
+
+        await self._emit("step_complete", {
+            "index": step.index,
+            "type": step.type.value,
+            "success": result.success,
+            "output": (result.output or "")[:300],
+            "error": result.error if not result.success else None,
+        })
+
+        if result.files_modified:
+            for f in result.files_modified:
+                await self._emit("file_modified", {"path": f})
+
+        if not result.success:
+            logger.error("步骤失败", step_index=step.index, error=result.error)
+        else:
+            logger.info("步骤完成", step_index=step.index, success=result.success)
+
+        return result
 
     @staticmethod
     def _format_context(ctx) -> str:

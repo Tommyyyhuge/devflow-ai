@@ -1,7 +1,6 @@
 """基础工具系统 — 文件操作 + Shell 执行
 
-Week 1 Day 3-4 最小集：read_file, write_file, list_dir。
-Day 5-6 将扩展 edit_file, run_shell。
+提供文件读写、目录列表、安全路径校验等基础能力。
 """
 
 import json

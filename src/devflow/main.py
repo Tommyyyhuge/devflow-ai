@@ -202,3 +202,50 @@ def analyze(project_path: str, search: str | None):
             console.print(f"\n[bold]🎯 相关文件 (Top {len(task_ctx.relevant_files)}):[/bold]")
             for f in task_ctx.relevant_files:
                 console.print(f"  📄 {f.relative} ({f.size:,} bytes)")
+
+
+@main.group()
+def budget():
+    """预算管理"""
+    pass
+
+
+@budget.command("show")
+def budget_show():
+    """显示预算使用情况"""
+    from devflow.llm.cost_tracker import CostTracker
+
+    cfg = load_config()
+    tracker = CostTracker(
+        weekly_limit=cfg.budget.weekly_budget,
+        per_5h_limit=cfg.budget.budget_per_5h,
+    )
+
+    summary = tracker.get_budget_summary()
+    weekly = summary["weekly"]
+    per_5h = summary["per_5h"]
+    session = summary["session"]
+
+    console.print("[bold]预算使用情况[/bold]\n")
+
+    console.print("[bold]周预算 (周一重置)[/bold]")
+    console.print(f"  限额:    ${weekly['limit']:.2f}")
+    console.print(f"  已用:    ${weekly['spent']:.5f}")
+    console.print(f"  剩余:    ${weekly['remaining']:.5f}")
+    if weekly["spent"] >= weekly["limit"] * 0.8:
+        console.print("  [yellow]! 周预算使用超过 80%[/yellow]")
+
+    console.print("\n[bold]5小时窗口预算[/bold]")
+    console.print(f"  限额:    ${per_5h['limit']:.2f}")
+    console.print(f"  已用:    ${per_5h['spent']:.5f}")
+    console.print(f"  剩余:    ${per_5h['remaining']:.5f}")
+    console.print(f"  上次重置: {per_5h['last_reset']}")
+    if per_5h["spent"] >= per_5h["limit"] * 0.8:
+        console.print("  [yellow]! 5小时预算使用超过 80%[/yellow]")
+
+    if session["call_count"] > 0:
+        console.print("\n[bold]本次会话[/bold]")
+        console.print(f"  LLM 调用: {session['call_count']} 次")
+        console.print(f"  Token 数: {session['total_tokens']:,}")
+        console.print(f"  成本:     ${float(session['total_cost_usd']):.5f}")
+        console.print(f"  节省:     ${float(session['total_savings_usd']):.5f} (vs GPT-4o)")

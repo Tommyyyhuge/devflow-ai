@@ -14,7 +14,7 @@ class TestSafeShell:
         """测试 ls 命令预览"""
         preview = shell._preview("ls -la")
         assert preview.risk_level == RiskLevel.LOW
-        assert "列出文件" in preview.predicted_effect
+        assert "只读查询" in preview.predicted_effect
 
     def test_preview_rm_command(self, shell):
         """测试 rm 命令预览"""
@@ -30,7 +30,8 @@ class TestSafeShell:
     def test_execute_low_risk(self, shell):
         """测试低风险命令直接执行"""
         result = shell.execute("echo test_output")
-        assert "test_output" in result
+        assert result.success
+        assert "test_output" in result.output
 
     def test_risk_level_classification(self, shell):
         """测试风险等级分类"""

@@ -1,0 +1,118 @@
+﻿E501 Line too long (107 > 100)
+   --> src\devflow\core\agent.py:161:97
+    |
+159 |             store.add_message(
+160 |                 conv_id, "tool",
+161 |                 f"姝ラ {step.index}: {result.output[:200]}" if result.success else f"澶辫触: {result.error}",
+    |                                                                                                     ^^^^^^^
+162 |                 metadata={
+163 |                     "type": "step_result",
+    |
+
+E501 Line too long (103 > 100)
+   --> src\devflow\llm\__init__.py:122:95
+    |
+121 |             except RateLimitError as e:
+122 |                 logger.warning("閬囧埌閫熺巼闄愬埗", attempt=attempt + 1, error=self._sanitize_error(str(e)))
+    |                                                                                                     ^^^
+123 |                 if attempt < max_retries - 1:
+124 |                     wait_time = 2 ** attempt  # 鎸囨暟閫€閬?    |
+
+E501 Line too long (130 > 100)
+  --> src\devflow\tools\file_ops.py:66:93
+   |
+64 | 鈥?65 | 鈥?66 | 鈥it, ls, cat, grep, find, curl, mkdir, touch, echo, wc, head, tail, pwd")
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+67 | 鈥?68 | 鈥?   |
+
+E501 Line too long (102 > 100)
+   --> tests\test_agent.py:196:101
+    |
+194 |         src.mkdir(parents=True)
+195 |         (src / "__init__.py").write_text("from .users import users_router\n")
+196 |         (src / "users.py").write_text("from fastapi import APIRouter\n\nusers_router = APIRouter()\n")
+    |                                                                                                     ^^
+197 |
+198 |         set_safe_root(tmp_path)
+    |
+
+E501 Line too long (195 > 100)
+   --> tests\test_agent.py:233:101
+    |
+231 | 鈥?232 | 鈥?233 | 鈥\nhealth_router = APIRouter()\n\n\n@health_router.get('/health')\ndef health():\n    return {'status': 'ok'}\n",
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+234 | 鈥?235 | 鈥?    |
+
+E501 Line too long (123 > 100)
+   --> tests\test_agent.py:252:101
+    |
+250 | 鈥?                            "path": "src/api/__init__.py",
+251 | 鈥?                            "old_string": "from .users import users_router",
+252 | 鈥?                            "new_string": "from .users import users_router\nfrom .health import health_router",
+    |                                                                                           ^^^^^^^^^^^^^^^^^^^^^^^
+253 | 鈥?                        }),
+254 | 鈥?                    }
+    |
+
+E501 Line too long (103 > 100)
+  --> tests\test_core_modules.py:42:101
+   |
+40 |     def config(self):
+41 |         """鍒涘缓娴嬭瘯鐢?LLMConfig"""
+42 |         return LLMConfig(api_key="sk-test1234", model="deepseek-v4-flash", max_tokens_per_request=8000)
+   |                                                                                                     ^^^
+43 |
+44 |     @pytest.fixture
+   |
+
+E501 Line too long (111 > 100)
+   --> tests\test_core_modules.py:183:101
+    |
+181 |         mock_response.model_dump.return_value = mock_data
+182 |
+183 |         with patch.object(client.client.chat.completions, "create", return_value=mock_response) as mock_create:
+    |                                                                                                     ^^^^^^^^^^^
+184 |             client.chat(messages, thinking=True)
+    |
+
+E501 Line too long (111 > 100)
+   --> tests\test_core_modules.py:199:101
+    |
+197 |         test_tools = [{"type": "function", "function": {"name": "test_tool"}}]
+198 |
+199 |         with patch.object(client.client.chat.completions, "create", return_value=mock_response) as mock_create:
+    |                                                                                                     ^^^^^^^^^^^
+200 |             client.chat(messages, tools=test_tools)
+    |
+
+E501 Line too long (111 > 100)
+   --> tests\test_core_modules.py:215:101
+    |
+213 |         mock_response.model_dump.return_value = mock_data
+214 |
+215 |         with patch.object(client.client.chat.completions, "create", return_value=mock_response) as mock_create:
+    |                                                                                                     ^^^^^^^^^^^
+216 |             result = client.chat_for_planning(messages)
+    |
+
+E501 Line too long (111 > 100)
+   --> tests\test_core_modules.py:233:101
+    |
+231 |         mock_response.model_dump.return_value = mock_data
+232 |
+233 |         with patch.object(client.client.chat.completions, "create", return_value=mock_response) as mock_create:
+    |                                                                                                     ^^^^^^^^^^^
+234 |             result = client.chat_for_execution(messages, tools=test_tools)
+    |
+
+E501 Line too long (114 > 100)
+   --> tests\test_core_modules.py:245:101
+    |
+243 |     def test_chat_unknown_error(self, client, messages):
+244 |         """楠岃瘉鏈煡寮傚父琚崟鑾峰苟杩斿洖閿欒淇℃伅"""
+245 |         with patch.object(client.client.chat.completions, "create", side_effect=RuntimeError("unexpected crash")):
+    |                                                                                                     ^^^^^^^^^^^^^^
+246 |             result = client.chat(messages, max_retries=1)
+    |
+
+Found 12 errors.

@@ -1,6 +1,6 @@
 """DevFlow Web UI — 文件夹上传 + AI 编程助手
 
-Week 2 升级：使用 Jinja2 模板，前后端分离。
+FastAPI + Jinja2 模板，支持 ZIP 项目上传和 AI 任务提交。
 """
 
 import shutil
@@ -146,6 +146,56 @@ async def run_task(req: TaskRequest, agent: Agent = Depends(get_agent)):
             "errors": verify_errors,
         },
     }
+
+
+@app.post("/api/run/stream")
+async def run_task_stream(req: TaskRequest):
+    """流式执行任务（SSE）"""
+    import asyncio
+    import json
+
+    from fastapi.responses import StreamingResponse
+
+    from devflow.core.agent import Agent
+    from devflow.llm import create_llm_provider
+    from devflow.tools import create_tool_registry
+    from devflow.tools.base import set_safe_root
+
+    repo_path = UPLOADS / req.project if req.project else Path(".").resolve()
+    set_safe_root(repo_path)
+
+    config = load_config()
+    llm_provider = create_llm_provider(config.llm)
+    tools = create_tool_registry()
+    event_queue = asyncio.Queue()
+    agent = Agent(llm_provider, tools, config=config, event_queue=event_queue)
+
+    async def event_generator():
+        # 启动 Agent 任务
+        task = asyncio.create_task(agent.run(req.task, repo_path))
+
+        while True:
+            event = await event_queue.get()
+            yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+            if event["type"] == "complete":
+                break
+
+        # 等待 Agent 任务完成，获取最终结果
+        result = await task
+        result_data = json.dumps({
+            "success": result.success,
+            "error": result.error,
+            "files_modified": result.files_modified,
+            "total_tokens": result.total_tokens,
+            "total_cost": result.total_cost_usd,
+        })
+        yield f"event: result\ndata: {result_data}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 # ========== 对话历史 API ==========

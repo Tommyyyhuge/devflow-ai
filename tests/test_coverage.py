@@ -1,7 +1,8 @@
 """补充测试 — 提升覆盖率到 70%+"""
 
 from devflow.config import AgentConfig, BudgetConfig, LLMConfig, load_config
-from devflow.tools.file_ops import EditFileTool, RunShellTool, SearchCodeTool
+from devflow.tools.file_ops import EditFileTool, SearchCodeTool
+from devflow.tools.shell import ShellTool
 
 
 class TestConfig:
@@ -33,12 +34,12 @@ class TestConfig:
 
 class TestToolsExtended:
     def test_run_shell_dangerous(self):
-        t = RunShellTool()
+        t = ShellTool()
         r = t.execute(command="shutdown now")
         assert not r.success
 
     def test_run_shell_timeout(self):
-        t = RunShellTool()
+        t = ShellTool()
         import sys
         if sys.platform == "win32":
             r = t.execute(command="timeout 10", timeout=1)
