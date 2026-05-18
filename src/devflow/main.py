@@ -1,8 +1,11 @@
 """CLI 入口 — devflow 命令"""
 
+import logging
 import sys
+from pathlib import Path
 
 import click
+import structlog
 from rich.console import Console
 
 from devflow.config import load_config
@@ -10,11 +13,58 @@ from devflow.config import load_config
 console = Console()
 
 
+def _configure_logging(log_level: str = "INFO"):
+    """配置统一日志"""
+    level = getattr(logging, log_level.upper(), logging.INFO)
+
+    # 配置标准库日志
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=level,
+    )
+
+    # 配置文件输出（轮转）
+    log_dir = Path.home() / ".devflow" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    from logging.handlers import RotatingFileHandler
+
+    file_handler = RotatingFileHandler(
+        log_dir / "devflow.log",
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(file_handler)
+
+    # 配置 structlog
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.JSONRenderer(),
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+
 @click.group()
 @click.version_option(version="0.1.0", prog_name="devflow")
-def main():
+@click.option("--log-level", default="INFO", help="日志级别 (DEBUG/INFO/WARNING/ERROR)")
+def main(log_level: str):
     """devflow-ai — 低成本的 AI 编程助手"""
-    pass
+    _configure_logging(log_level)
 
 
 @main.command()

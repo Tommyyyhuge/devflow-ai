@@ -1,6 +1,6 @@
 """配置管理 — 环境变量 + .env 文件"""
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,22 @@ class LLMConfig(BaseSettings):
     model: str = "deepseek-v4-flash"
     max_tokens_per_request: int = 8000
 
+    @field_validator("max_tokens_per_request")
+    @classmethod
+    def validate_max_tokens(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_tokens_per_request 必须大于 0")
+        if v > 128000:
+            raise ValueError("max_tokens_per_request 不能超过 128000")
+        return v
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("base_url 必须以 http:// 或 https:// 开头")
+        return v
+
 
 class AgentConfig(BaseSettings):
     """Agent 行为配置"""
@@ -32,6 +48,15 @@ class AgentConfig(BaseSettings):
     auto_confirm: bool = False
     ask_on_failure: bool = True
 
+    @field_validator("context_budget", "code_context_budget")
+    @classmethod
+    def validate_budget_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("预算必须大于 0")
+        if v > 1_000_000:
+            raise ValueError("预算不能超过 1,000,000")
+        return v
+
 
 class BudgetConfig(BaseSettings):
     """预算上限配置"""
@@ -43,6 +68,15 @@ class BudgetConfig(BaseSettings):
     )
     weekly_budget: float = 20.0
     budget_per_5h: float = 3.5
+
+    @field_validator("weekly_budget", "budget_per_5h")
+    @classmethod
+    def validate_budget_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("预算必须大于 0")
+        if v > 10000:
+            raise ValueError("预算不能超过 10000")
+        return v
 
 
 class RouterConfig(BaseSettings):

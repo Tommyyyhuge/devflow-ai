@@ -4,27 +4,68 @@
 """
 
 import json
+import structlog
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = structlog.get_logger(__name__)
 
 # 安全工作目录
 _SAFE_ROOT: Path | None = None
 
 
-def set_safe_root(root: str | Path):
-    """设置工作目录边界"""
+def set_safe_root(root: str | Path | None):
+    """设置工作目录边界。传入 None 表示取消限制。"""
     global _SAFE_ROOT
-    _SAFE_ROOT = Path(root).resolve()
+    if root is None:
+        _SAFE_ROOT = None
+    else:
+        _SAFE_ROOT = Path(root).resolve()
 
 
 def _safe_path(path: str) -> Path:
-    """验证路径在安全边界内，拒绝越界访问"""
+    """验证路径在安全边界内，拒绝越界访问。
+
+    安全检查：
+    1. 路径解析后必须位于 _SAFE_ROOT 下（使用 relative_to 防止绕过）
+    2. 符号链接指向也必须位于 _SAFE_ROOT 下
+    3. 路径规范化（resolve 消除 .. 和符号链接）
+    """
     if _SAFE_ROOT is None:
         return Path(path)
+
+    # 规范化路径（消除 .. 和符号链接）
     resolved = (_SAFE_ROOT / path).resolve()
-    if not str(resolved).startswith(str(_SAFE_ROOT)):
+
+    # 检查 1：解析后的路径必须在安全根目录下
+    try:
+        resolved.relative_to(_SAFE_ROOT)
+    except ValueError:
+        logger.warning(
+            "路径遍历攻击被阻止",
+            attempted_path=path,
+            resolved_path=str(resolved),
+            safe_root=str(_SAFE_ROOT),
+        )
         raise PermissionError(f"拒绝越界访问: {path}")
+
+    # 检查 2：如果路径存在且是符号链接，检查真实目标
+    if resolved.exists() and resolved.is_symlink():
+        real_target = resolved.readlink()
+        if not real_target.is_absolute():
+            real_target = (_SAFE_ROOT / real_target).resolve()
+        try:
+            real_target.relative_to(_SAFE_ROOT)
+        except ValueError:
+            logger.warning(
+                "符号链接攻击被阻止",
+                attempted_path=path,
+                symlink_target=str(real_target),
+                safe_root=str(_SAFE_ROOT),
+            )
+            raise PermissionError(f"拒绝符号链接越界: {path}")
+
     return resolved
 
 

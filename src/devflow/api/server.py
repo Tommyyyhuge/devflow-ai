@@ -8,6 +8,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+import structlog
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -19,6 +20,8 @@ from devflow.history.store import ConversationStore
 from devflow.llm import create_llm_provider
 from devflow.tools import create_tool_registry
 from devflow.tools.base import _safe_path, set_safe_root
+
+logger = structlog.get_logger()
 
 app = FastAPI()
 UPLOADS = Path("uploads").resolve()
@@ -79,8 +82,19 @@ async def upload_project(file: UploadFile = File(...)):
         return JSONResponse({"error": "无效的项目名"}, status_code=400)
 
     dest = UPLOADS / safe_name
+
+    # 备份已存在的项目（避免数据丢失）
     if dest.exists():
-        shutil.rmtree(dest)
+        backup_name = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        backup_path = UPLOADS / backup_name
+        try:
+            shutil.move(str(dest), str(backup_path))
+            logger.info(f"已备份旧项目: {safe_name} -> {backup_name}")
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"备份旧项目失败: {str(e)}"},
+                status_code=500
+            )
 
     temp_zip = UPLOADS / f"{safe_name}.zip"
     temp_zip.write_bytes(content)
@@ -88,18 +102,71 @@ async def upload_project(file: UploadFile = File(...)):
     try:
         with zipfile.ZipFile(temp_zip) as zf:
             infos = zf.infolist()
+
+            # 检查 1：文件数量限制
             if len(infos) > 100:
-                temp_zip.unlink()
+                logger.warning(
+                    "上传被拒绝：文件数量过多",
+                    project=safe_name,
+                    file_count=len(infos),
+                )
                 return JSONResponse({"error": "超过 100 个文件限制"}, status_code=400)
+
+            # 检查 2：解压后大小限制
             total_size = sum(info.file_size for info in infos)
             if total_size > 100 * 1024 * 1024:
-                temp_zip.unlink()
+                logger.warning(
+                    "上传被拒绝：解压后过大",
+                    project=safe_name,
+                    total_size_mb=total_size / (1024 * 1024),
+                )
                 return JSONResponse({"error": "解压后超过 100MB 限制"}, status_code=400)
+
+            # 检查 3：ZIP 炸弹检测（压缩比异常）
+            compressed_size = sum(info.compress_size for info in infos)
+            if compressed_size > 0:
+                ratio = total_size / compressed_size
+                if ratio > 100:  # 压缩比超过 100 倍，可能是 ZIP 炸弹
+                    logger.warning(
+                        "上传被拒绝：检测到 ZIP 炸弹",
+                        project=safe_name,
+                        compression_ratio=ratio,
+                    )
+                    return JSONResponse(
+                        {"error": "检测到 ZIP 炸弹攻击（压缩比异常）"},
+                        status_code=400
+                    )
+
+            # 检查 4：路径遍历防护
+            for info in infos:
+                # 检查文件名是否包含路径遍历
+                if '..' in info.filename or info.filename.startswith('/'):
+                    logger.warning(
+                        "上传被拒绝：ZIP 包含非法路径",
+                        project=safe_name,
+                        illegal_path=info.filename,
+                    )
+                    return JSONResponse(
+                        {"error": f"ZIP 中包含非法路径: {info.filename}"},
+                        status_code=400
+                    )
+
+            logger.info(
+                "开始解压 ZIP",
+                project=safe_name,
+                file_count=len(infos),
+                total_size=total_size,
+            )
             zf.extractall(dest)
+            logger.info("ZIP 解压成功", project=safe_name)
     except zipfile.BadZipFile:
-        temp_zip.unlink()
+        logger.warning("上传被拒绝：无效的 ZIP 文件", project=safe_name)
         return JSONResponse({"error": "无效的 zip 文件"}, status_code=400)
+    except Exception as e:
+        logger.error("解压失败", project=safe_name, error=str(e))
+        return JSONResponse({"error": f"解压失败: {str(e)}"}, status_code=500)
     finally:
+        # 清理临时文件
         if temp_zip.exists():
             temp_zip.unlink()
 

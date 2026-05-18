@@ -8,12 +8,15 @@
 
 import re
 import shlex
+import structlog
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from enum import Enum
 
 from devflow.tools.base import Tool, ToolResult
+
+logger = structlog.get_logger(__name__)
 
 
 class RiskLevel(Enum):
@@ -179,6 +182,33 @@ class ShellTool(Tool):
 
         return True, ""
 
+    def validate_command(self, command: str) -> tuple[bool, str]:
+        """公共API：验证命令安全性。
+
+        Returns:
+            (是否安全, 错误信息)
+        """
+        if not command or not command.strip():
+            return False, "空命令"
+
+        # 检查管道和重定向（额外防护层）
+        if '|' in command:
+            logger.warning("管道操作被拒绝", command=command)
+            return False, "禁止管道操作"
+
+        if '>' in command or '<' in command:
+            logger.warning("重定向操作被拒绝", command=command)
+            return False, "禁止重定向操作"
+
+        is_safe, error_msg = self._check_static_rules(command)
+        if not is_safe:
+            logger.warning(
+                "危险命令被拒绝",
+                command=command,
+                reason=error_msg,
+            )
+        return is_safe, error_msg
+
     # ---------- 三步执行流程（继承自 ShellTool） ----------
 
     def _classify_risk(self, command: str) -> RiskLevel:
@@ -264,20 +294,33 @@ class ShellTool(Tool):
 
     def execute(self, command: str, timeout: int = 30, **kwargs) -> ToolResult:
         """执行 Shell 命令（多层安全 + 三步流程）"""
-        # 空命令检查
-        if not command or not command.strip():
-            return ToolResult(success=False, error="命令不能为空")
+        logger.info("开始执行 shell 命令", command=command, timeout=timeout)
 
-        # Step 1: 静态安全检查（白名单/黑名单/危险参数）
-        is_safe, error_msg = self._check_static_rules(command)
+        # Step 1: 静态安全检查（白名单/黑名单/危险参数/管道/重定向）
+        is_safe, error_msg = self.validate_command(command)
         if not is_safe:
-            return ToolResult(success=False, error=error_msg)
+            logger.warning(
+                "命令未通过安全校验",
+                command=command,
+                reason=error_msg,
+            )
+            return ToolResult(success=False, error=f"安全校验失败: {error_msg}")
 
         # Step 2: 风险预览
         preview = self._preview(command)
+        logger.info(
+            "命令风险评级",
+            command=command,
+            risk_level=preview.risk_level.value,
+        )
 
         # 高风险命令需要确认（除非 auto_confirm=True）
         if preview.risk_level == RiskLevel.HIGH and not self.auto_confirm:
+            logger.warning(
+                "高风险命令被阻止（需要确认）",
+                command=command,
+                effect=preview.predicted_effect,
+            )
             return ToolResult(
                 success=False,
                 error=(
@@ -290,10 +333,25 @@ class ShellTool(Tool):
         # Step 3: 模拟执行
         simulation = self._simulate(command)
         if not simulation.is_safe:
+            logger.warning(
+                "模拟执行失败",
+                command=command,
+                warnings=simulation.warnings,
+            )
             return ToolResult(
                 success=False,
                 error=f"模拟失败: {', '.join(simulation.warnings)}",
             )
 
         # Step 4: 真实执行
-        return self._exec_real(command, timeout=timeout)
+        logger.info("开始真实执行", command=command)
+        result = self._exec_real(command, timeout=timeout)
+        if result.success:
+            logger.info("命令执行成功", command=command)
+        else:
+            logger.warning(
+                "命令执行失败",
+                command=command,
+                error=result.error,
+            )
+        return result
