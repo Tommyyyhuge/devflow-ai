@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from devflow.config import load_config
+from devflow.config import get_config_dict, load_config, save_config
 from devflow.core.agent import Agent
 from devflow.history.store import ConversationStore
 from devflow.llm import create_llm_provider
@@ -459,6 +459,137 @@ async def search_files(q: str, path: str = ""):
         return {"query": q, "results": results}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- 配置管理 API ----------
+
+@app.get("/api/config")
+async def get_config():
+    """获取当前配置（不包含 API Key）"""
+    config = load_config()
+    return get_config_dict(config, include_api_key=False)
+
+
+@app.post("/api/config")
+async def update_config(req: Request):
+    """更新配置（支持部分更新）"""
+    try:
+        data = await req.json()
+        config = load_config()
+
+        # 更新 LLM 配置
+        if "llm" in data:
+            llm_data = data["llm"]
+            if "api_key" in llm_data and llm_data["api_key"]:
+                config.llm.api_key = SecretStr(llm_data["api_key"])
+            if "base_url" in llm_data and llm_data["base_url"]:
+                config.llm.base_url = llm_data["base_url"]
+            if "model" in llm_data and llm_data["model"]:
+                config.llm.model = llm_data["model"]
+            if "max_tokens_per_request" in llm_data:
+                config.llm.max_tokens_per_request = llm_data["max_tokens_per_request"]
+            if "name" in llm_data:
+                config.llm.name = llm_data["name"]
+
+        # 更新 Agent 配置
+        if "agent" in data:
+            agent_data = data["agent"]
+            for key in ["context_budget", "code_context_budget", "auto_confirm", "ask_on_failure"]:
+                if key in agent_data:
+                    setattr(config.agent, key, agent_data[key])
+
+        # 更新 Budget 配置
+        if "budget" in data:
+            budget_data = data["budget"]
+            for key in ["weekly_budget", "budget_per_5h"]:
+                if key in budget_data:
+                    setattr(config.budget, key, budget_data[key])
+
+        # 更新 Router 配置
+        if "router" in data:
+            router_data = data["router"]
+            for key in ["enabled", "strategy"]:
+                if key in router_data:
+                    setattr(config.router, key, router_data[key])
+
+        # 更新日志级别
+        if "log_level" in data and data["log_level"]:
+            config.log_level = data["log_level"]
+
+        # 验证配置
+        try:
+            # 触发验证器
+            _ = config.llm.max_tokens_per_request
+            _ = config.budget.weekly_budget
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        # 保存配置
+        save_config(config)
+        logger.info("配置已更新并保存")
+
+        return {"success": True, "message": "配置已保存"}
+
+    except Exception as e:
+        logger.error("配置保存失败", error=str(e))
+        return JSONResponse({"error": f"保存失败: {str(e)}"}, status_code=500)
+
+
+class TestConnectionRequest(BaseModel):
+    api_key: str
+    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-v4-flash"
+
+
+@app.post("/api/config/test")
+async def test_connection(req: TestConnectionRequest):
+    """测试 API Key 是否有效"""
+    try:
+        from devflow.llm.providers.openai import OpenAIProvider
+        from devflow.config import LLMConfig
+
+        # 创建临时配置
+        test_config = LLMConfig(
+            api_key=req.api_key,
+            base_url=req.base_url,
+            model=req.model,
+        )
+
+        # 创建 Provider
+        provider = OpenAIProvider(test_config)
+
+        # 发送测试请求（简单对话）
+        messages = [{"role": "user", "content": "Hi"}]
+        response = provider.chat(messages)
+
+        if "error" in response.data:
+            error_msg = response.data["error"].get("message", "未知错误")
+            return JSONResponse(
+                {"success": False, "message": f"连接失败: {error_msg}"},
+                status_code=400,
+            )
+
+        # 获取模型信息
+        model_info = response.data.get("model", req.model)
+
+        return {
+            "success": True,
+            "message": "连接成功",
+            "model": model_info,
+        }
+
+    except Exception as e:
+        logger.error("连接测试失败", error=str(e))
+        return JSONResponse(
+            {"success": False, "message": f"连接失败: {str(e)}"},
+            status_code=500,
+        )
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    """设置页面"""
+    return templates.TemplateResponse(request, "settings.html")
 
 
 def main():

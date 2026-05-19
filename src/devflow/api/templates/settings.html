@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DevFlow - 系统设置</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--primary:#58a6ff;--primary2:#1f6feb;--success:#238636;--warning:#f0883e;--danger:#da3633;--radius:8px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
+.container{max-width:800px;margin:0 auto;padding:40px 20px}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.header h1{font-size:24px;font-weight:600}
+.back-btn{color:var(--primary);text-decoration:none;font-size:14px}
+.back-btn:hover{text-decoration:underline}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:20px}
+.card-title{font-size:18px;font-weight:600;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.form-group{margin-bottom:20px}
+.form-group:last-child{margin-bottom:0}
+label{display:block;font-size:14px;font-weight:500;margin-bottom:8px;color:var(--text)}
+.input,.select{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;transition:border-color .2s}
+.input:focus,.select:focus{outline:none;border-color:var(--primary)}
+.input::placeholder{color:var(--text2)}
+.input-group{display:flex;gap:8px}
+.input-group .input{flex:1}
+.btn{padding:10px 16px;border:none;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;transition:opacity .2s}
+.btn:hover{opacity:.85}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-secondary{background:var(--border);color:var(--text)}
+.btn-success{background:var(--success);color:#fff}
+.btn-warning{background:var(--warning);color:#fff}
+.btn-group{display:flex;gap:12px;margin-top:24px;padding-top:20px;border-top:1px solid var(--border)}
+.toggle{display:flex;align-items:center;gap:12px;cursor:pointer}
+.toggle input[type="checkbox"]{width:44px;height:24px;appearance:none;background:var(--border);border-radius:12px;position:relative;cursor:pointer;transition:background .2s}
+.toggle input[type="checkbox"]::after{content:'';position:absolute;width:20px;height:20px;background:#fff;border-radius:50%;top:2px;left:2px;transition:transform .2s}
+.toggle input[type="checkbox"]:checked{background:var(--primary)}
+.toggle input[type="checkbox"]:checked::after{transform:translateX(20px)}
+.toggle-label{font-size:14px}
+.hint{font-size:12px;color:var(--text2);margin-top:6px}
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:var(--radius);font-size:14px;font-weight:500;z-index:1000;animation:slideIn .3s ease}
+.toast.success{background:var(--success);color:#fff}
+.toast.error{background:var(--danger);color:#fff}
+.toast.warning{background:var(--warning);color:#fff}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-radius:50%;border-top-color:#fff;animation:spin 1s linear infinite;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.status{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;font-size:13px;font-weight:500}
+.status.success{background:rgba(35,134,54,.2);color:#3fb950}
+.status.error{background:rgba(218,54,51,.2);color:#f85149}
+.status.loading{background:rgba(88,166,255,.2);color:var(--primary)}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>⚙️ 系统设置</h1>
+    <a href="/" class="back-btn">← 返回首页</a>
+  </div>
+
+  <!-- LLM 配置 -->
+  <div class="card">
+    <div class="card-title">🤖 LLM 配置</div>
+    <div class="form-group">
+      <label>API Key</label>
+      <div class="input-group">
+        <input type="password" id="apiKey" class="input" placeholder="sk-...">
+        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility()">👁️</button>
+      </div>
+      <div class="hint">你的 DeepSeek API Key，<a href="https://platform.deepseek.com" target="_blank" style="color:var(--primary)">点击获取</a></div>
+    </div>
+    <div class="form-group">
+      <label>API 端点</label>
+      <input type="text" id="baseUrl" class="input" placeholder="https://api.deepseek.com">
+    </div>
+    <div class="form-group">
+      <label>模型</label>
+      <select id="model" class="select">
+        <option value="deepseek-v4-flash">deepseek-v4-flash（推荐）</option>
+        <option value="deepseek-chat">deepseek-chat</option>
+        <option value="deepseek-coder">deepseek-coder</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Max Tokens</label>
+      <input type="number" id="maxTokens" class="input" min="1000" max="128000" step="1000">
+      <div class="hint">单次请求最大 Token 数（1000 - 128000）</div>
+    </div>
+  </div>
+
+  <!-- Agent 配置 -->
+  <div class="card">
+    <div class="card-title">🔧 Agent 配置</div>
+    <div class="form-group">
+      <label>上下文预算</label>
+      <input type="number" id="contextBudget" class="input" min="1000" max="1000000" step="1000">
+      <div class="hint">Agent 可用的最大 Token 数量</div>
+    </div>
+    <div class="form-group">
+      <label>代码上下文预算</label>
+      <input type="number" id="codeContextBudget" class="input" min="1000" max="1000000" step="1000">
+      <div class="hint">代码相关的最大 Token 数量</div>
+    </div>
+    <div class="form-group">
+      <label class="toggle">
+        <input type="checkbox" id="autoConfirm">
+        <span class="toggle-label">自动确认高风险操作</span>
+      </label>
+      <div class="hint">开启后 Agent 将自动执行高风险命令（如删除文件）</div>
+    </div>
+    <div class="form-group">
+      <label class="toggle">
+        <input type="checkbox" id="askOnFailure">
+        <span class="toggle-label">失败时询问</span>
+      </label>
+      <div class="hint">任务失败时是否询问用户如何处理</div>
+    </div>
+  </div>
+
+  <!-- 预算配置 -->
+  <div class="card">
+    <div class="card-title">💰 预算配置</div>
+    <div class="form-group">
+      <label>周预算（美元）</label>
+      <input type="number" id="weeklyBudget" class="input" min="0.1" max="10000" step="0.1">
+      <div class="hint">每周最大消费金额</div>
+    </div>
+    <div class="form-group">
+      <label>5小时预算（美元）</label>
+      <input type="number" id="budgetPer5h" class="input" min="0.1" max="10000" step="0.1">
+      <div class="hint">每 5 小时最大消费金额</div>
+    </div>
+  </div>
+
+  <!-- 日志配置 -->
+  <div class="card">
+    <div class="card-title">📝 日志配置</div>
+    <div class="form-group">
+      <label>日志级别</label>
+      <select id="logLevel" class="select">
+        <option value="DEBUG">DEBUG（详细）</option>
+        <option value="INFO">INFO（默认）</option>
+        <option value="WARNING">WARNING（警告）</option>
+        <option value="ERROR">ERROR（错误）</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 操作按钮 -->
+  <div class="btn-group">
+    <button type="button" class="btn btn-secondary" onclick="resetConfig()">重置默认</button>
+    <button type="button" class="btn btn-warning" onclick="testConnection()" id="testBtn">🔄 测试连接</button>
+    <button type="button" class="btn btn-primary" onclick="saveConfig()" id="saveBtn">💾 保存配置</button>
+  </div>
+</div>
+
+<script>
+// 页面加载时获取配置
+document.addEventListener('DOMContentLoaded', loadConfig);
+
+// 加载配置
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    const config = await r.json();
+    
+    // 填充表单
+    document.getElementById('baseUrl').value = config.llm.base_url || '';
+    document.getElementById('model').value = config.llm.model || 'deepseek-v4-flash';
+    document.getElementById('maxTokens').value = config.llm.max_tokens_per_request || 8000;
+    
+    document.getElementById('contextBudget').value = config.agent.context_budget || 140000;
+    document.getElementById('codeContextBudget').value = config.agent.code_context_budget || 60000;
+    document.getElementById('autoConfirm').checked = config.agent.auto_confirm || false;
+    document.getElementById('askOnFailure').checked = config.agent.ask_on_failure !== false;
+    
+    document.getElementById('weeklyBudget').value = config.budget.weekly_budget || 20;
+    document.getElementById('budgetPer5h').value = config.budget.budget_per_5h || 3.5;
+    
+    document.getElementById('logLevel').value = config.log_level || 'INFO';
+  } catch (e) {
+    showToast('加载配置失败: ' + e.message, 'error');
+  }
+}
+
+// 切换 API Key 可见性
+function toggleApiKeyVisibility() {
+  const input = document.getElementById('apiKey');
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+// 保存配置
+async function saveConfig() {
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>保存中...';
+  
+  try {
+    const config = {
+      llm: {
+        api_key: document.getElementById('apiKey').value,
+        base_url: document.getElementById('baseUrl').value,
+        model: document.getElementById('model').value,
+        max_tokens_per_request: parseInt(document.getElementById('maxTokens').value),
+      },
+      agent: {
+        context_budget: parseInt(document.getElementById('contextBudget').value),
+        code_context_budget: parseInt(document.getElementById('codeContextBudget').value),
+        auto_confirm: document.getElementById('autoConfirm').checked,
+        ask_on_failure: document.getElementById('askOnFailure').checked,
+      },
+      budget: {
+        weekly_budget: parseFloat(document.getElementById('weeklyBudget').value),
+        budget_per_5h: parseFloat(document.getElementById('budgetPer5h').value),
+      },
+      log_level: document.getElementById('logLevel').value,
+    };
+    
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(config),
+    });
+    
+    const result = await r.json();
+    if (result.success) {
+      showToast('配置已保存', 'success');
+      // 清空 API Key 输入框（安全考虑）
+      document.getElementById('apiKey').value = '';
+    } else {
+      showToast(result.error || '保存失败', 'error');
+    }
+  } catch (e) {
+    showToast('保存失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '💾 保存配置';
+  }
+}
+
+// 测试连接
+async function testConnection() {
+  const btn = document.getElementById('testBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>测试中...';
+  
+  try {
+    const apiKey = document.getElementById('apiKey').value;
+    if (!apiKey) {
+      showToast('请先输入 API Key', 'warning');
+      return;
+    }
+    
+    const r = await fetch('/api/config/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        api_key: apiKey,
+        base_url: document.getElementById('baseUrl').value,
+        model: document.getElementById('model').value,
+      }),
+    });
+    
+    const result = await r.json();
+    if (result.success) {
+      showToast(`✓ 连接成功 (${result.model})`, 'success');
+    } else {
+      showToast(result.message || '连接失败', 'error');
+    }
+  } catch (e) {
+    showToast('测试失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔄 测试连接';
+  }
+}
+
+// 重置配置
+async function resetConfig() {
+  if (!confirm('确定要重置为默认配置吗？')) return;
+  
+  try {
+    // 重置为默认值
+    document.getElementById('apiKey').value = '';
+    document.getElementById('baseUrl').value = 'https://api.deepseek.com';
+    document.getElementById('model').value = 'deepseek-v4-flash';
+    document.getElementById('maxTokens').value = 8000;
+    document.getElementById('contextBudget').value = 140000;
+    document.getElementById('codeContextBudget').value = 60000;
+    document.getElementById('autoConfirm').checked = false;
+    document.getElementById('askOnFailure').checked = true;
+    document.getElementById('weeklyBudget').value = 20;
+    document.getElementById('budgetPer5h').value = 3.5;
+    document.getElementById('logLevel').value = 'INFO';
+    
+    showToast('已重置为默认值，请保存', 'warning');
+  } catch (e) {
+    showToast('重置失败: ' + e.message, 'error');
+  }
+}
+
+// 显示提示
+function showToast(message, type) {
+  const toast = document.createElement('div');
+  toast.className = 'toast ' + type;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+</script>
+</body>
+</html>

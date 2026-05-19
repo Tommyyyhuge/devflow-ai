@@ -1,7 +1,18 @@
-"""配置管理 — 环境变量 + .env 文件"""
+"""配置管理 — 环境变量 + .env 文件 + Web 端持久化
+
+支持三种配置来源（优先级从高到低）：
+1. Web 端保存的配置（~/.devflow/config.json，API Key 加密存储）
+2. 环境变量 / .env 文件
+3. 默认值
+"""
+
+import json
+from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from devflow.encryption import decrypt_value, encrypt_value, is_encrypted
 
 
 class LLMConfig(BaseSettings):
@@ -101,6 +112,149 @@ class DevFlowConfig(BaseSettings):
     log_level: str = "INFO"
 
 
+def _get_config_file() -> Path:
+    """获取配置文件路径"""
+    config_dir = Path.home() / ".devflow"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir / "config.json"
+
+
 def load_config() -> DevFlowConfig:
-    """加载配置：.env 文件 → 环境变量 → 默认值（pydantic-settings 自动处理 .env）"""
-    return DevFlowConfig()
+    """加载配置：Web 端配置 → 环境变量 → 默认值
+
+    优先级：
+    1. Web 端保存的配置（~/.devflow/config.json）
+    2. 环境变量 / .env 文件
+    3. 默认值
+    """
+    # 首先加载默认配置（会从环境变量/.env 读取）
+    config = DevFlowConfig()
+
+    # 然后加载 Web 端保存的配置（优先级更高）
+    config_file = _get_config_file()
+    if config_file.exists():
+        try:
+            saved_config = json.loads(config_file.read_text(encoding="utf-8"))
+
+            # 更新 LLM 配置
+            if "llm" in saved_config:
+                llm_data = saved_config["llm"]
+                if "api_key_encrypted" in llm_data:
+                    # 解密 API Key
+                    encrypted = llm_data.pop("api_key_encrypted")
+                    if encrypted:
+                        llm_data["api_key"] = SecretStr(decrypt_value(encrypted))
+                # 只更新非空值
+                for key, value in llm_data.items():
+                    if value and hasattr(config.llm, key):
+                        setattr(config.llm, key, value)
+
+            # 更新 Agent 配置
+            if "agent" in saved_config:
+                for key, value in saved_config["agent"].items():
+                    if hasattr(config.agent, key):
+                        setattr(config.agent, key, value)
+
+            # 更新 Budget 配置
+            if "budget" in saved_config:
+                for key, value in saved_config["budget"].items():
+                    if hasattr(config.budget, key):
+                        setattr(config.budget, key, value)
+
+            # 更新 Router 配置
+            if "router" in saved_config:
+                for key, value in saved_config["router"].items():
+                    if hasattr(config.router, key):
+                        setattr(config.router, key, value)
+
+            # 更新日志级别
+            if "log_level" in saved_config:
+                config.log_level = saved_config["log_level"]
+
+        except Exception:
+            # 加载失败时回退到默认配置
+            pass
+
+    return config
+
+
+def save_config(config: DevFlowConfig) -> None:
+    """保存配置到 Web 端配置文件
+
+    API Key 会被加密存储。
+    """
+    config_file = _get_config_file()
+
+    # 备份旧配置
+    if config_file.exists():
+        backup_file = config_file.with_suffix(".json.bak")
+        backup_file.write_bytes(config_file.read_bytes())
+
+    # 构建保存数据
+    save_data = {
+        "version": "1.0",
+        "llm": {
+            "name": config.llm.name,
+            "api_key_encrypted": encrypt_value(config.llm.api_key.get_secret_value()),
+            "base_url": config.llm.base_url,
+            "model": config.llm.model,
+            "max_tokens_per_request": config.llm.max_tokens_per_request,
+        },
+        "agent": {
+            "context_budget": config.agent.context_budget,
+            "code_context_budget": config.agent.code_context_budget,
+            "auto_confirm": config.agent.auto_confirm,
+            "ask_on_failure": config.agent.ask_on_failure,
+        },
+        "budget": {
+            "weekly_budget": config.budget.weekly_budget,
+            "budget_per_5h": config.budget.budget_per_5h,
+        },
+        "router": {
+            "enabled": config.router.enabled,
+            "strategy": config.router.strategy,
+        },
+        "log_level": config.log_level,
+    }
+
+    config_file.write_text(
+        json.dumps(save_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def get_config_dict(config: DevFlowConfig, include_api_key: bool = False) -> dict:
+    """将配置转换为字典（用于 API 响应）
+
+    Args:
+        config: 配置对象
+        include_api_key: 是否包含 API Key（默认 False，安全考虑）
+    """
+    result = {
+        "llm": {
+            "name": config.llm.name,
+            "base_url": config.llm.base_url,
+            "model": config.llm.model,
+            "max_tokens_per_request": config.llm.max_tokens_per_request,
+        },
+        "agent": {
+            "context_budget": config.agent.context_budget,
+            "code_context_budget": config.agent.code_context_budget,
+            "auto_confirm": config.agent.auto_confirm,
+            "ask_on_failure": config.agent.ask_on_failure,
+        },
+        "budget": {
+            "weekly_budget": config.budget.weekly_budget,
+            "budget_per_5h": config.budget.budget_per_5h,
+        },
+        "router": {
+            "enabled": config.router.enabled,
+            "strategy": config.router.strategy,
+        },
+        "log_level": config.log_level,
+    }
+
+    if include_api_key:
+        result["llm"]["api_key"] = config.llm.api_key.get_secret_value()
+
+    return result
